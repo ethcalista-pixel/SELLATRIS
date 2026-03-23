@@ -1,0 +1,441 @@
+-- IKController.lua  (ModuleScript — child of PoseEditor LocalScript)
+--
+-- Drives arm IK by cloning the FULL character (Humanoid included, so
+-- CharacterMesh applies and the arm looks correct), hiding everything
+-- except the target arm + its morphs, welding the clone to the real
+-- character so it follows movement, then driving the clone arm CFrame
+-- directly each frame — zero Motor6D writes, animations irrelevant.
+
+local RunService        = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local IKTEMPLATE = ReplicatedStorage:FindFirstChild("IKTEMPLATE")
+
+local LIMB_TO_CATEGORY = {
+	["Left Arm"]  = "LeftArm",
+	["Right Arm"] = "RightArm",
+}
+
+-- ── helpers ───────────────────────────────────────────────────────────────────
+local function mk(cls, parent, props)
+	local i = Instance.new(cls)
+	if parent then i.Parent = parent end
+	if props  then for k, v in pairs(props) do i[k] = v end end
+	return i
+end
+
+local function getTemplateParts(limbName)
+	local socketPart, ikPart
+
+	if IKTEMPLATE then
+		local isLeft = (limbName == "Left Arm")
+		for _, child in ipairs(IKTEMPLATE:GetChildren()) do
+			local cn = child.Name:lower()
+			if (isLeft and cn:find("left")) or (not isLeft and cn:find("right")) then
+				local s  = child:FindFirstChild("socket")
+				local ik = child:FindFirstChild("IK")
+				if s and ik then
+					socketPart = s:Clone(); ikPart = ik:Clone(); break
+				end
+			end
+		end
+		if not socketPart then
+			local sf = IKTEMPLATE:FindFirstChild("socket", true)
+			if sf then socketPart = sf:Clone() end
+		end
+		if not ikPart then
+			local ikf = IKTEMPLATE:FindFirstChild("IK", true)
+			if ikf then ikPart = ikf:Clone() end
+		end
+	end
+
+	if not socketPart then
+		socketPart          = Instance.new("Part")
+		socketPart.Shape    = Enum.PartType.Ball
+		socketPart.Size     = Vector3.new(0.32, 0.32, 0.32)
+		socketPart.Color    = Color3.fromRGB(255, 115, 115)
+		socketPart.Material = Enum.Material.Neon
+		socketPart.CastShadow = false
+	end
+	if not ikPart then
+		ikPart          = Instance.new("Part")
+		ikPart.Shape    = Enum.PartType.Ball
+		ikPart.Size     = Vector3.new(0.48, 0.48, 0.48)
+		ikPart.Color    = Color3.fromRGB(255, 58, 58)
+		ikPart.Material = Enum.Material.Neon
+		ikPart.CastShadow = false
+	end
+
+	for _, p in ipairs({ socketPart, ikPart }) do
+		p.Anchored   = true
+		p.CanCollide = false
+		p.CanQuery   = false
+		p.CanTouch   = false
+		p.Massless   = true
+	end
+	return socketPart, ikPart
+end
+
+-- ── module ────────────────────────────────────────────────────────────────────
+local IKController = {}
+IKController.__index = IKController
+
+function IKController.new(player, gui)
+	local self  = setmetatable({}, IKController)
+	self.player = player
+	self.gui    = gui
+	self.active = {}
+	return self
+end
+
+function IKController:isActive(limbName)
+	return self.active[limbName] ~= nil
+end
+
+function IKController:enable(limbName)
+	self:disable(limbName)
+
+	local player = self.player
+	local char   = player.Character
+	if not char then return end
+
+	local isLeft    = (limbName == "Left Arm")
+	local torso     = char:FindFirstChild("Torso")
+	local armPart   = char:FindFirstChild(limbName)
+	local realHRP   = char:FindFirstChild("HumanoidRootPart")
+	if not torso or not armPart or not realHRP then return end
+
+	local jointName = isLeft and "Left Shoulder" or "Right Shoulder"
+	local motor     = torso:FindFirstChild(jointName)
+	if not motor then return end
+
+	-- ── Clone the entire character ────────────────────────────────────────────
+	-- Humanoid must survive so CharacterMesh applies to the arm part.
+	char.Archivable = true
+	local cloneModel = char:Clone()
+	char.Archivable = false
+
+	-- Strip scripts and animator so nothing fights us
+	for _, v in ipairs(cloneModel:GetDescendants()) do
+		if v:IsA("Script") or v:IsA("LocalScript") or v:IsA("Animator") then
+			v:Destroy()
+		end
+	end
+
+	-- Completely disable the clone Humanoid — it must exist for CharacterMesh
+	-- to render, but we don't want it simulating, colliding, or moving anything.
+	local cloneHuman = cloneModel:FindFirstChildWhichIsA("Humanoid")
+	if cloneHuman then
+		cloneHuman.WalkSpeed       = 0
+		cloneHuman.JumpPower       = 0
+		cloneHuman.AutoRotate      = false
+		cloneHuman.PlatformStand   = true   -- disables physics state machine
+		cloneHuman:ChangeState(Enum.HumanoidStateType.None)
+	end
+
+	-- Remove all Motor6Ds in the clone so the arm is free to be driven directly
+	for _, v in ipairs(cloneModel:GetDescendants()) do
+		if v:IsA("Motor6D") then v:Destroy() end
+	end
+
+	cloneModel.Parent = workspace
+
+	-- Re-enforce after parenting — Roblox can reset CanCollide on insertion
+	for _, v in ipairs(cloneModel:GetDescendants()) do
+		if v:IsA("BasePart") then
+			v.Anchored   = true
+			v.CanCollide = false
+			v.CanQuery   = false
+			v.CanTouch   = false
+		end
+	end
+
+	-- Get the clone's counterpart parts
+	local cloneHRP  = cloneModel:FindFirstChild("HumanoidRootPart")
+	local cloneArm  = cloneModel:FindFirstChild(limbName)
+	local cloneTorso = cloneModel:FindFirstChild("Torso")
+	if not cloneHRP or not cloneArm or not cloneTorso then
+		cloneModel:Destroy(); return
+	end
+
+	-- Belt-and-suspenders: zero out HRP collision explicitly
+	cloneHRP.Anchored   = true
+	cloneHRP.CanCollide = false
+	cloneHRP.CanQuery   = false
+	cloneHRP.CanTouch   = false
+	cloneHRP.Size       = Vector3.new(0.001, 0.001, 0.001)   -- collapse hitbox to nothing
+
+	-- Make all clone parts anchored, non-colliding, non-interacting
+	for _, v in ipairs(cloneModel:GetDescendants()) do
+		if v:IsA("BasePart") then
+			v.Anchored   = true
+			v.CanCollide = false
+			v.CanQuery   = false
+			v.CanTouch   = false
+		end
+	end
+
+	-- ── Hide all clone parts except the target arm ────────────────────────────
+	-- We show: cloneArm + morph parts tagged for this limb.
+	-- Everything else gets Transparency = 1.
+	local morphCat = LIMB_TO_CATEGORY[limbName]
+
+	-- Collect the clone's arm-relative offsets for morph parts
+	-- (morph parts are direct children of cloneModel tagged with MorphCategory)
+	local morphOffsets = {}   -- { clonePart, offset }  driven each frame
+	local hasMorphParts = false
+
+	-- First pass: hide everything in the clone
+	for _, v in ipairs(cloneModel:GetDescendants()) do
+		if v:IsA("BasePart") then
+			v.Transparency = 1
+		elseif v:IsA("Decal") or v:IsA("Texture") then
+			v.Transparency = 1
+		end
+	end
+
+	-- Show the arm (unless a morph replaces it — decided below)
+	-- We'll set cloneArm visible/invisible after checking morphs
+	cloneArm.Anchored = true   -- driven directly
+
+	-- Show morph parts tagged for this limb
+	if morphCat then
+		for _, child in ipairs(cloneModel:GetChildren()) do
+			if child:GetAttribute("MorphCategory") == morphCat then
+				local parts = {}
+				if child:IsA("BasePart") then
+					parts = { child }
+				else
+					for _, d in ipairs(child:GetDescendants()) do
+						if d:IsA("BasePart") then table.insert(parts, d) end
+					end
+				end
+				for _, p in ipairs(parts) do
+					local isMiddle  = (p.Name == "Middle")
+					local hasHidden = p:FindFirstChild("Hidden") ~= nil
+					-- Check corresponding original part transparency to know if it was visible
+					-- We use the original char's morph transparency as ground truth
+					if not isMiddle and not hasHidden then
+						-- Find matching part in original char to check original transparency
+						local origChild = char:FindFirstChild(child.Name)
+						local origPart  = origChild and (origChild:IsA("BasePart") and origChild
+							or origChild:FindFirstChild(p.Name, true))
+						local wasVisible = origPart and origPart.Transparency < 1 or true
+						if wasVisible then
+							p.Transparency = 0
+							-- Store arm-relative offset for driving in bind
+							local relCF = armPart.CFrame:Inverse() * p.CFrame
+							table.insert(morphOffsets, { part = p, offset = relCF })
+							hasMorphParts = true
+						end
+					end
+				end
+			end
+		end
+	end
+
+	-- Show clone arm only if no morph is replacing it
+	cloneArm.Transparency = hasMorphParts and 1 or 0
+
+	-- Show accessories welded to this arm in the original (copy to clone arm)
+	-- Accessories in R6 are welded to body parts; find ones on the arm
+	for _, acc in ipairs(char:GetChildren()) do
+		if acc:IsA("Accessory") then
+			local handle = acc:FindFirstChild("Handle")
+			if handle then
+				for _, w in ipairs(handle:GetChildren()) do
+					if (w:IsA("Weld") or w:IsA("WeldConstraint")) then
+						local p0 = w:IsA("Weld") and w.Part0 or w.Part0
+						local p1 = w:IsA("Weld") and w.Part1 or w.Part1
+						if p0 == armPart or p1 == armPart then
+							-- Show the matching accessory handle in the clone
+							local cloneAcc = cloneModel:FindFirstChild(acc.Name)
+							if cloneAcc then
+								local cloneHandle = cloneAcc:FindFirstChild("Handle")
+								if cloneHandle then
+									cloneHandle.Transparency = 0
+									cloneHandle.Anchored = true
+									local relCF = armPart.CFrame:Inverse() * handle.CFrame
+									table.insert(morphOffsets, { part = cloneHandle, offset = relCF })
+								end
+							end
+						end
+					end
+				end
+			end
+		end
+	end
+
+	-- ── Hide original arm + morphs ────────────────────────────────────────────
+	local hiddenParts = {}
+	local function hide(part)
+		table.insert(hiddenParts, { part = part, t = part.Transparency })
+		part.Transparency = 1
+	end
+
+	hide(armPart)
+	for _, c in ipairs(armPart:GetChildren()) do
+		if c:IsA("Decal") or c:IsA("Texture") then hide(c) end
+	end
+
+	if morphCat then
+		for _, child in ipairs(char:GetChildren()) do
+			if child:GetAttribute("MorphCategory") == morphCat then
+				if child:IsA("BasePart") then
+					hide(child)
+				else
+					for _, d in ipairs(child:GetDescendants()) do
+						if d:IsA("BasePart") or d:IsA("Decal") or d:IsA("Texture") then
+							hide(d)
+						end
+					end
+				end
+			end
+		end
+	end
+
+	-- ── Socket & IK indicator parts ───────────────────────────────────────────
+	local outDir         = isLeft and -torso.CFrame.RightVector or torso.CFrame.RightVector
+	local socketWorldPos = (torso.CFrame * motor.C0).Position + outDir * 0.5
+	local torsoSocketOffset = torso.CFrame:Inverse() * CFrame.new(socketWorldPos)
+
+	local socketPart, ikPart = getTemplateParts(limbName)
+	socketPart.CFrame = CFrame.new(socketWorldPos)
+	socketPart.Parent = workspace
+
+	local halfH  = armPart.Size.Y * 0.5
+	local tipPos = (armPart.CFrame * CFrame.new(0, -halfH, 0)).Position + outDir * 0.5
+	ikPart.CFrame  = CFrame.new(tipPos)
+	ikPart.Parent  = workspace
+
+	-- ── Drag handles ──────────────────────────────────────────────────────────
+	local mh = mk("Handles", self.gui, {
+		Adornee = ikPart,
+		Faces   = Faces.new(
+			Enum.NormalId.Front, Enum.NormalId.Back,
+			Enum.NormalId.Left,  Enum.NormalId.Right,
+			Enum.NormalId.Top,   Enum.NormalId.Bottom
+		),
+		Style = Enum.HandlesStyle.Movement,
+	})
+
+	local sb = mk("SelectionBox", self.gui, {
+		Adornee             = ikPart,
+		Color3              = Color3.fromRGB(255, 58, 58),
+		LineThickness       = 0.04,
+		SurfaceTransparency = 0.88,
+		SurfaceColor3       = Color3.fromRGB(255, 58, 58),
+	})
+
+	local startPos, faceNorm = nil, nil
+	mh.MouseButton1Down:Connect(function(face)
+		startPos = ikPart.Position
+		local cf = ikPart.CFrame
+		local map = {
+			[Enum.NormalId.Right]  =  cf.RightVector,
+			[Enum.NormalId.Left]   = -cf.RightVector,
+			[Enum.NormalId.Top]    =  cf.UpVector,
+			[Enum.NormalId.Bottom] = -cf.UpVector,
+			[Enum.NormalId.Front]  =  cf.LookVector,
+			[Enum.NormalId.Back]   = -cf.LookVector,
+		}
+		faceNorm = map[face] or Vector3.new(0, 1, 0)
+	end)
+	mh.MouseDrag:Connect(function(_, dist)
+		if not startPos or not faceNorm then return end
+		ikPart.CFrame = CFrame.new(startPos + faceNorm * dist)
+	end)
+	mh.MouseButton1Up:Connect(function()
+		startPos = nil; faceNorm = nil
+	end)
+
+	-- ── Capture arm roll for IK solve ─────────────────────────────────────────
+	local originalArmRight = armPart.CFrame.RightVector
+
+	-- ── Per-arm BindToRenderStep ──────────────────────────────────────────────
+	local bindName = "IKCtrl_" .. limbName:gsub(" ", "_")
+
+	RunService:BindToRenderStep(bindName, Enum.RenderPriority.Last.Value, function()
+		local char2 = player.Character
+		if not char2 then return end
+		local torso2  = char2:FindFirstChild("Torso")
+		local realHRP2 = char2:FindFirstChild("HumanoidRootPart")
+		if not torso2 or not realHRP2 then return end
+		if not cloneModel.Parent then return end
+
+		-- Keep clone HRP synced with real HRP so the whole clone follows the character
+		cloneHRP.CFrame = realHRP2.CFrame
+
+		-- Socket tracks torso shoulder each frame
+		socketPart.CFrame = torso2.CFrame * torsoSocketOffset
+
+		-- Solve arm geometry: socket → IK target
+		local sockPos = socketPart.Position
+		local ikPos   = ikPart.Position   -- world-anchored
+		local dir     = ikPos - sockPos
+		if dir.Magnitude < 0.001 then return end
+		dir = dir.Unit
+
+		local halfH2   = cloneArm.Size.Y * 0.5
+		local center   = sockPos + dir * halfH2
+		local upVec    = -dir
+
+		-- Gram-Schmidt: preserve natural arm roll
+		local dot      = upVec:Dot(originalArmRight)
+		local projR    = originalArmRight - upVec * dot
+		local rightVec = projR.Magnitude > 0.001 and projR.Unit
+			or (upVec:Cross(torso2.CFrame.RightVector)).Unit
+		local backVec  = (rightVec:Cross(upVec)).Unit
+
+		local newArmCF = CFrame.fromMatrix(center, rightVec, upVec, backVec)
+
+		-- Drive clone arm
+		cloneArm.CFrame = newArmCF
+
+		-- Drive morph/accessory parts at their stored arm-relative offsets
+		for _, entry in ipairs(morphOffsets) do
+			if entry.part.Parent then
+				entry.part.CFrame = newArmCF * entry.offset
+			end
+		end
+	end)
+
+	self.active[limbName] = {
+		cloneModel   = cloneModel,
+		socketPart   = socketPart,
+		ikPart       = ikPart,
+		handle       = mh,
+		selBox       = sb,
+		hiddenParts  = hiddenParts,
+		bindName     = bindName,
+	}
+end
+
+function IKController:disable(limbName)
+	local h = self.active[limbName]
+	if not h then return end
+
+	pcall(function() RunService:UnbindFromRenderStep(h.bindName) end)
+
+	if h.handle     and h.handle.Parent     then h.handle:Destroy()     end
+	if h.selBox     and h.selBox.Parent     then h.selBox:Destroy()     end
+	if h.socketPart and h.socketPart.Parent then h.socketPart:Destroy() end
+	if h.ikPart     and h.ikPart.Parent     then h.ikPart:Destroy()     end
+	if h.cloneModel and h.cloneModel.Parent then h.cloneModel:Destroy() end
+
+	for _, entry in ipairs(h.hiddenParts) do
+		if entry.part and entry.part.Parent then
+			entry.part.Transparency = entry.t
+		end
+	end
+
+	self.active[limbName] = nil
+end
+
+function IKController:disableAll()
+	for limbName in pairs(table.clone(self.active)) do
+		self:disable(limbName)
+	end
+end
+
+return IKController
