@@ -1,0 +1,99 @@
+-- SyncServer.lua  (Script – ServerScriptService)
+
+local Players           = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local RATE_LIMIT_SECONDS = 10
+local MAX_SYNC_DISTANCE  = 30
+
+local function getOrMake(parent, cls, name)
+	local e = parent:FindFirstChild(name)
+	if e then return e end
+	local i = Instance.new(cls); i.Name = name; i.Parent = parent; return i
+end
+
+local SyncRemotes    = getOrMake(ReplicatedStorage, "Folder",          "SyncRemotes")
+local SyncRequest    = getOrMake(SyncRemotes,       "RemoteEvent",     "SyncRequest")
+local SyncInvite     = getOrMake(SyncRemotes,       "RemoteEvent",     "SyncInvite")
+local SyncRespond    = getOrMake(SyncRemotes,       "RemoteEvent",     "SyncRespond")
+local SyncState      = getOrMake(SyncRemotes,       "RemoteEvent",     "SyncState")
+local UnsyncRequest  = getOrMake(SyncRemotes,       "RemoteEvent",     "UnsyncRequest")
+getOrMake(SyncRemotes, "RemoteEvent", "DuoAnimRequest")
+getOrMake(SyncRemotes, "RemoteEvent", "StartDuoAnim")
+getOrMake(SyncRemotes, "RemoteEvent", "StopDuoAnim")
+
+local syncPairs      = {}
+local pendingInvites = {}
+local rateLimits     = {}
+
+local function getPartner(player)
+	local pid = syncPairs[player.UserId]
+	return pid and Players:GetPlayerByUserId(pid)
+end
+
+local function unsyncPlayer(player)
+	local partner = getPartner(player)
+	syncPairs[player.UserId] = nil
+	if partner then
+		syncPairs[partner.UserId] = nil
+		SyncState:FireClient(partner, nil)
+	end
+	SyncState:FireClient(player, nil)
+end
+
+local function getHRP(player)
+	return player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+end
+
+SyncRequest.OnServerEvent:Connect(function(requester, target)
+	if not target or typeof(target) ~= "Instance" or not target:IsA("Player") then return end
+	if target == requester or not target.Parent then return end
+
+	local now = tick()
+	if now - (rateLimits[requester.UserId] or 0) < RATE_LIMIT_SECONDS then return end
+	rateLimits[requester.UserId] = now
+
+	if syncPairs[requester.UserId] or syncPairs[target.UserId] then return end
+
+	local reqHRP = getHRP(requester)
+	local tgtHRP = getHRP(target)
+	if not reqHRP or not tgtHRP then return end
+	if (reqHRP.Position - tgtHRP.Position).Magnitude > MAX_SYNC_DISTANCE then return end
+
+	for tId, rId in pairs(pendingInvites) do
+		if rId == requester.UserId then pendingInvites[tId] = nil; break end
+	end
+
+	pendingInvites[target.UserId] = requester.UserId
+	SyncInvite:FireClient(target, requester)
+end)
+
+SyncRespond.OnServerEvent:Connect(function(target, accepted)
+	local requesterId = pendingInvites[target.UserId]
+	pendingInvites[target.UserId] = nil
+	if not requesterId then return end
+
+	local requester = Players:GetPlayerByUserId(requesterId)
+	if not requester or not accepted then return end
+	if syncPairs[requester.UserId] or syncPairs[target.UserId] then return end
+
+	syncPairs[requester.UserId] = target.UserId
+	syncPairs[target.UserId]    = requester.UserId
+	SyncState:FireClient(requester, target)
+	SyncState:FireClient(target,    requester)
+end)
+
+UnsyncRequest.OnServerEvent:Connect(function(player)
+	unsyncPlayer(player)
+end)
+
+Players.PlayerRemoving:Connect(function(player)
+	pendingInvites[player.UserId] = nil
+	rateLimits[player.UserId]     = nil
+	unsyncPlayer(player)
+end)
+
+local pairLookup = getOrMake(SyncRemotes, "BindableFunction", "GetSyncPartner")
+pairLookup.OnInvoke = function(player)
+	return getPartner(player)
+end
