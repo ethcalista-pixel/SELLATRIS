@@ -1,0 +1,312 @@
+-- AnimationManager.lua  (LocalScript – StarterPlayerScripts)
+
+local Players           = game:GetService("Players")
+local RunService        = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local player    = Players.LocalPlayer
+local animsRoot = ReplicatedStorage:WaitForChild("ANIMS")
+
+local BarEvents      = ReplicatedStorage:WaitForChild("BarEvents", 10)
+local playEvent      = BarEvents:WaitForChild("PlayAnim", 10)
+local animSpeedValue = BarEvents:FindFirstChild("AnimSpeed") or
+	(function()
+		local v = Instance.new("NumberValue")
+		v.Name = "AnimSpeed"; v.Value = 1; v.Parent = BarEvents; return v
+	end)()
+
+local inDuoSession = BarEvents:FindFirstChild("InDuoSession")
+if not inDuoSession then
+	inDuoSession        = Instance.new("BoolValue")
+	inDuoSession.Name   = "InDuoSession"
+	inDuoSession.Value  = false
+	inDuoSession.Parent = BarEvents
+end
+
+local SyncRemotes      = ReplicatedStorage:WaitForChild("SyncRemotes",   30)
+local SyncState        = SyncRemotes:WaitForChild("SyncState",           30)
+local DuoAnimRequest   = SyncRemotes:WaitForChild("DuoAnimRequest",      30)
+local StartDuoAnim     = SyncRemotes:WaitForChild("StartDuoAnim",        30)
+local StopDuoAnim      = SyncRemotes:WaitForChild("StopDuoAnim",         30)
+local DuoAnimTick      = SyncRemotes:WaitForChild("DuoAnimTick",         30)
+local DuoAnimReplicate = SyncRemotes:WaitForChild("DuoAnimReplicate",    30)
+local SyncSpeed        = SyncRemotes:WaitForChild("SyncSpeed",           30)
+local SetPartnerSpeed  = SyncRemotes:WaitForChild("SetPartnerSpeed",     30)
+
+local TICK_RATE = 3
+
+-- ── Easing ────────────────────────────────────────────────────────────────────
+local function bounceOut(t)
+	local n, d = 7.5625, 2.75
+	if     t < 1/d   then return n*t*t
+	elseif t < 2/d   then t=t-1.5/d;  return n*t*t+0.75
+	elseif t < 2.5/d then t=t-2.25/d; return n*t*t+0.9375
+	else                   t=t-2.625/d; return n*t*t+0.984375
+	end
+end
+local function easeIn(t, s)
+	if s=="Constant" then return 0 end
+	if s=="Cubic"    then return t*t*t end
+	if s=="Bounce"   then return 1-bounceOut(1-t) end
+	if s=="Elastic"  then
+		if t==0 then return 0 end; if t==1 then return 1 end
+		return -(math.pow(2,10*t-10)*math.sin((t*10-10.75)*(2*math.pi/3)))
+	end
+	return t
+end
+local function easeOut(t, s)
+	if s=="Constant" then return 1 end
+	if s=="Bounce"   then return bounceOut(t) end
+	if s=="Elastic"  then
+		if t==0 then return 0 end; if t==1 then return 1 end
+		return math.pow(2,-10*t)*math.sin((t*10-0.75)*(2*math.pi/3))+1
+	end
+	return 1-easeIn(1-t, s)
+end
+local function applyEasing(t, es, ed)
+	es = es or "Linear"; ed = ed or "Out"
+	if es == "Linear" then return t end
+	if ed == "In"     then return easeIn(t, es) end
+	if ed == "Out"    then return easeOut(t, es) end
+	if t < 0.5 then return easeIn(t*2, es)*0.5 end
+	return easeOut((t-0.5)*2, es)*0.5+0.5
+end
+
+-- ── Anim loader ───────────────────────────────────────────────────────────────
+local animCache = {}
+local function loadAnim(cat, animName)
+	animCache[cat] = animCache[cat] or {}
+	if animCache[cat][animName] then return animCache[cat][animName] end
+	local catFolder = animsRoot:FindFirstChild(cat); if not catFolder then return nil end
+	local mod = catFolder:FindFirstChild(animName)
+	if not mod or not mod:IsA("ModuleScript") then return nil end
+	local ok, raw = pcall(require, mod)
+	if not ok or type(raw) ~= "table" then return nil end
+	local timeline, jointSet, duration = {}, {}, 0
+	for _, kf in ipairs(raw) do
+		if type(kf) ~= "table" then continue end
+		local t = kf.tm; if type(t) ~= "number" then continue end
+		if t > duration then duration = t end
+		for pn, data in pairs(kf) do
+			if pn=="tm" or type(data)~="table" then continue end
+			local cf = data.cf; if typeof(cf)~="CFrame" then continue end
+			if not timeline[pn] then timeline[pn]={};jointSet[pn]=true end
+			table.insert(timeline[pn], {t=t, cf=cf, es=data.es or "Linear", ed=data.ed or "Out"})
+		end
+	end
+	for _, tl in pairs(timeline) do table.sort(tl, function(a,b) return a.t<b.t end) end
+	local joints = {}
+	for name in pairs(jointSet) do table.insert(joints, name) end
+	table.sort(joints)
+	if #joints == 0 then return nil end
+	local result = {duration=duration, joints=joints, timeline=timeline}
+	animCache[cat][animName] = result
+	return result
+end
+
+-- ── Joint helpers ─────────────────────────────────────────────────────────────
+local function buildJointMap(character)
+	local jd, seen = {}, {}
+	for _, v in ipairs(character:GetDescendants()) do
+		if v:IsA("Motor6D") and not seen[v] then
+			seen[v] = true
+			table.insert(jd, {motor=v, origC0=v.C0, partName=(v.Part1 and v.Part1.Name) or v.Name})
+		end
+	end
+	return jd
+end
+
+local function restoreJoints(jd)
+	for _, e in ipairs(jd) do
+		if e.motor and e.motor.Parent then e.motor.C0 = e.origC0 end
+	end
+end
+
+local function applyFrame(jd, cursors, anim, elapsed)
+	local t = elapsed
+	for _, entry in ipairs(jd) do
+		local motor = entry.motor; local pn = entry.partName
+		if not motor or not motor.Parent then continue end
+		local tl = anim.timeline[pn]
+		if not tl then motor.C0 = entry.origC0; continue end
+		local n = #tl
+		if t <= tl[1].t then motor.C0 = entry.origC0*tl[1].cf; continue end
+		if t >= tl[n].t then motor.C0 = entry.origC0*tl[n].cf; continue end
+		local cursor = cursors[pn] or 1
+		while cursor < n-1 and tl[cursor+1].t <= t do cursor+=1 end
+		cursors[pn] = cursor
+		local kA, kB = tl[cursor], tl[cursor+1]
+		local span   = kB.t-kA.t
+		local raw    = (span>0) and math.clamp((t-kA.t)/span,0,1) or 0
+		motor.C0     = entry.origC0 * kA.cf:Lerp(kB.cf, applyEasing(raw, kA.es, kA.ed))
+	end
+end
+
+local function getAnimator(char)
+	local hum = char and char:FindFirstChildWhichIsA("Humanoid")
+	return hum and hum:FindFirstChildWhichIsA("Animator")
+end
+
+local function disableAnimate(char)
+	local a = char:FindFirstChild("Animate"); if a then a.Disabled=true end
+	local animator = getAnimator(char)
+	if animator then
+		for _, track in ipairs(animator:GetPlayingAnimationTracks()) do track:Stop(0) end
+	end
+	return animator
+end
+
+local function enableAnimate(char)
+	local a = char and char:FindFirstChild("Animate"); if a then a.Disabled=false end
+end
+
+-- ── State ─────────────────────────────────────────────────────────────────────
+local syncedWith  = nil
+local pendingStop = false
+
+local myChar     = nil; local myAnim     = nil
+local myRole     = nil; local myAnimName = nil
+local myJD       = {};  local myCursors  = {}; local myElapsed = 0
+
+local partnerUserId  = nil; local partnerRole    = nil; local partnerAnimName = nil
+local partnerJD      = {};  local partnerCursors = {}; local partnerElapsed  = 0
+
+local renderConn     = nil
+local animPlayedConn = nil
+local tickCounter    = 0
+
+local function stopDuoSession()
+	if renderConn     then renderConn:Disconnect();     renderConn     = nil end
+	if animPlayedConn then animPlayedConn:Disconnect(); animPlayedConn = nil end
+	restoreJoints(myJD)
+	restoreJoints(partnerJD)
+	if myChar then enableAnimate(myChar) end
+	inDuoSession.Value = false
+	pendingStop = false
+	myChar=nil; myAnim=nil; myRole=nil; myAnimName=nil
+	myJD={}; myCursors={}; myElapsed=0
+	partnerUserId=nil; partnerRole=nil; partnerAnimName=nil
+	partnerJD={}; partnerCursors={}; partnerElapsed=0
+	tickCounter=0
+end
+
+local function startDuoSession(role, animName, pUserId)
+	stopDuoSession()
+	local char = player.Character; if not char then return end
+	local anim = loadAnim(role, animName)
+	if not anim then return end
+
+	inDuoSession.Value = true
+	local animator = disableAnimate(char)
+	if animator then
+		animPlayedConn = animator.AnimationPlayed:Connect(function(track) track:Stop(0) end)
+	end
+
+	myChar = char; myAnim = anim; myRole = role; myAnimName = animName
+	myJD = buildJointMap(char); myCursors = {}; myElapsed = 0
+	for _, name in ipairs(anim.joints) do myCursors[name]=1 end
+
+	partnerUserId   = pUserId
+	partnerRole     = (role=="Dom") and "Sub" or "Dom"
+	partnerAnimName = animName
+
+	task.spawn(function()
+		loadAnim(partnerRole, partnerAnimName)
+		local pp = Players:GetPlayerByUserId(pUserId)
+		if pp and pp.Character then
+			partnerJD = buildJointMap(pp.Character); partnerCursors = {}
+		end
+	end)
+
+	renderConn = RunService.RenderStepped:Connect(function(dt)
+		if player.Character ~= myChar then stopDuoSession(); return end
+
+		local speed = math.max(animSpeedValue.Value, 0)
+
+		myElapsed += dt * speed
+		if anim.duration > 0 and myElapsed >= anim.duration then
+			myElapsed = myElapsed % anim.duration
+			for _, name in ipairs(anim.joints) do myCursors[name]=1 end
+		end
+		applyFrame(myJD, myCursors, anim, myElapsed)
+
+		tickCounter += 1
+		if tickCounter >= TICK_RATE then
+			tickCounter = 0
+			DuoAnimTick:FireServer(myElapsed)
+		end
+
+		if #partnerJD == 0 and partnerUserId then
+			local pp = Players:GetPlayerByUserId(partnerUserId)
+			if pp and pp.Character then
+				partnerJD = buildJointMap(pp.Character); partnerCursors = {}
+			end
+		end
+
+		if #partnerJD > 0 then
+			local pAnim = loadAnim(partnerRole, partnerAnimName)
+			if pAnim then
+				partnerElapsed += dt * speed
+				if pAnim.duration > 0 and partnerElapsed >= pAnim.duration then
+					partnerElapsed = partnerElapsed % pAnim.duration
+					for _, name in ipairs(pAnim.joints) do partnerCursors[name]=1 end
+				end
+				applyFrame(partnerJD, partnerCursors, pAnim, partnerElapsed)
+			end
+		end
+	end)
+end
+
+-- ── Events ────────────────────────────────────────────────────────────────────
+SyncState.OnClientEvent:Connect(function(partner)
+	syncedWith = partner
+	if not partner and inDuoSession.Value then stopDuoSession() end
+end)
+
+StartDuoAnim.OnClientEvent:Connect(function(role, animName, pUserId)
+	if pendingStop then
+		pendingStop = false; inDuoSession.Value = false; return
+	end
+	startDuoSession(role, animName, pUserId)
+end)
+
+StopDuoAnim.OnClientEvent:Connect(function()
+	stopDuoSession()
+end)
+
+DuoAnimReplicate.OnClientEvent:Connect(function(userId, elapsed)
+	if userId ~= partnerUserId then return end
+	partnerElapsed = elapsed; partnerCursors = {}
+end)
+
+playEvent.Event:Connect(function(cat, animName)
+	if not ((cat == "Dom" or cat == "Sub") and syncedWith) then return end
+
+	if inDuoSession.Value or pendingStop then
+		if myRole == cat and myAnimName == animName then
+			pendingStop = false
+			stopDuoSession()
+			DuoAnimRequest:FireServer("__STOP__", "")
+		else
+			pendingStop = false
+			DuoAnimRequest:FireServer(cat, animName)
+		end
+		return
+	end
+
+	inDuoSession.Value = true
+	pendingStop        = false
+	DuoAnimRequest:FireServer(cat, animName)
+end)
+
+animSpeedValue.Changed:Connect(function(newSpeed)
+	if inDuoSession.Value then SyncSpeed:FireServer(newSpeed) end
+end)
+
+SetPartnerSpeed.OnClientEvent:Connect(function(speed)
+	animSpeedValue.Value = speed
+end)
+
+player.CharacterAdded:Connect(function()
+	stopDuoSession()
+end)
