@@ -1,0 +1,199 @@
+-- AnimPlayer.lua  (LocalScript – StarterPlayerScripts)
+
+local Players           = game:GetService("Players")
+local RunService        = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local player    = Players.LocalPlayer
+local animsRoot = ReplicatedStorage:WaitForChild("ANIMS")
+
+local BarEvents = ReplicatedStorage:WaitForChild("BarEvents", 10)
+
+local playEvent = BarEvents:FindFirstChild("PlayAnim")
+if not playEvent then
+	playEvent = Instance.new("BindableEvent")
+	playEvent.Name = "PlayAnim"; playEvent.Parent = BarEvents
+end
+
+local animSpeedValue = BarEvents:FindFirstChild("AnimSpeed")
+if not animSpeedValue then
+	animSpeedValue = Instance.new("NumberValue")
+	animSpeedValue.Name = "AnimSpeed"; animSpeedValue.Value = 1; animSpeedValue.Parent = BarEvents
+end
+
+local inDuoSession = BarEvents:FindFirstChild("InDuoSession")
+if not inDuoSession then
+	inDuoSession = Instance.new("BoolValue")
+	inDuoSession.Name = "InDuoSession"; inDuoSession.Value = false; inDuoSession.Parent = BarEvents
+end
+
+-- ── Easing ────────────────────────────────────────────────────────────────────
+local function bounceOut(t)
+	local n, d = 7.5625, 2.75
+	if     t < 1/d   then return n*t*t
+	elseif t < 2/d   then t=t-1.5/d;  return n*t*t+0.75
+	elseif t < 2.5/d then t=t-2.25/d; return n*t*t+0.9375
+	else                   t=t-2.625/d; return n*t*t+0.984375
+	end
+end
+local function easeIn(t, s)
+	if s=="Constant" then return 0 end
+	if s=="Cubic"    then return t*t*t end
+	if s=="Bounce"   then return 1-bounceOut(1-t) end
+	if s=="Elastic"  then
+		if t==0 then return 0 end; if t==1 then return 1 end
+		return -(math.pow(2,10*t-10)*math.sin((t*10-10.75)*(2*math.pi/3)))
+	end
+	return t
+end
+local function easeOut(t, s)
+	if s=="Constant" then return 1 end
+	if s=="Bounce"   then return bounceOut(t) end
+	if s=="Elastic"  then
+		if t==0 then return 0 end; if t==1 then return 1 end
+		return math.pow(2,-10*t)*math.sin((t*10-0.75)*(2*math.pi/3))+1
+	end
+	return 1-easeIn(1-t, s)
+end
+local function applyEasing(t, es, ed)
+	es = es or "Linear"; ed = ed or "Out"
+	if es == "Linear" then return t end
+	if ed == "In"     then return easeIn(t, es) end
+	if ed == "Out"    then return easeOut(t, es) end
+	if t < 0.5 then return easeIn(t*2, es)*0.5 end
+	return easeOut((t-0.5)*2, es)*0.5+0.5
+end
+
+-- ── Anim loader ───────────────────────────────────────────────────────────────
+local animCache = {}
+local function loadAnim(cat, animName)
+	animCache[cat] = animCache[cat] or {}
+	if animCache[cat][animName] then return animCache[cat][animName] end
+	local catFolder = animsRoot:FindFirstChild(cat); if not catFolder then return nil end
+	local mod = catFolder:FindFirstChild(animName)
+	if not mod or not mod:IsA("ModuleScript") then return nil end
+	local ok, raw = pcall(require, mod)
+	if not ok or type(raw) ~= "table" then return nil end
+	local timeline, jointSet, duration = {}, {}, 0
+	for _, kf in ipairs(raw) do
+		if type(kf) ~= "table" then continue end
+		local t = kf.tm; if type(t) ~= "number" then continue end
+		if t > duration then duration = t end
+		for pn, data in pairs(kf) do
+			if pn=="tm" or type(data)~="table" then continue end
+			local cf = data.cf; if typeof(cf)~="CFrame" then continue end
+			if not timeline[pn] then timeline[pn]={}; jointSet[pn]=true end
+			table.insert(timeline[pn], {t=t, cf=cf, es=data.es or "Linear", ed=data.ed or "Out"})
+		end
+	end
+	for _, tl in pairs(timeline) do table.sort(tl, function(a,b) return a.t<b.t end) end
+	local joints = {}
+	for name in pairs(jointSet) do table.insert(joints, name) end
+	table.sort(joints)
+	if #joints == 0 then return nil end
+	local anim = {duration=duration, joints=joints, timeline=timeline}
+	animCache[cat][animName] = anim
+	return anim
+end
+
+-- ── Playback state ────────────────────────────────────────────────────────────
+local currentCat  = nil
+local currentName = nil
+local jointData   = {}
+local elapsed     = 0
+local cursors     = {}
+local renderConn  = nil
+
+local function stopAnimScript()
+	local char = player.Character; if not char then return end
+	local a = char:FindFirstChild("Animate"); if a then a.Disabled=true end
+	local hum = char:FindFirstChildWhichIsA("Humanoid"); if not hum then return end
+	local animator = hum:FindFirstChildWhichIsA("Animator"); if not animator then return end
+	for _, track in ipairs(animator:GetPlayingAnimationTracks()) do track:Stop(0) end
+end
+
+local function restoreAnimScript()
+	local char = player.Character; if not char then return end
+	local a = char:FindFirstChild("Animate"); if a then a.Disabled=false end
+end
+
+local function buildJointMap()
+	jointData = {}
+	local char = player.Character; if not char then return end
+	local seen = {}
+	for _, v in ipairs(char:GetDescendants()) do
+		if v:IsA("Motor6D") and not seen[v] then
+			seen[v] = true
+			table.insert(jointData, {motor=v, origC0=v.C0, partName=(v.Part1 and v.Part1.Name) or v.Name})
+		end
+	end
+end
+
+local function restoreJoints()
+	for _, e in ipairs(jointData) do
+		if e.motor and e.motor.Parent then e.motor.C0 = e.origC0 end
+	end
+end
+
+local function stopPlayback()
+	if renderConn then renderConn:Disconnect(); renderConn=nil end
+	restoreJoints(); restoreAnimScript()
+	jointData={}; currentCat=nil; currentName=nil; elapsed=0; cursors={}
+end
+
+local function startPlayback(cat, animName)
+	stopPlayback()
+	local char = player.Character; if not char then return end
+	local anim = loadAnim(cat, animName); if not anim then return end
+
+	stopAnimScript(); buildJointMap()
+	currentCat = cat; currentName = animName; elapsed = 0; cursors = {}
+	for _, name in ipairs(anim.joints) do cursors[name]=1 end
+
+	renderConn = RunService.RenderStepped:Connect(function(dt)
+		if inDuoSession.Value then return end
+		if player.Character ~= char then stopPlayback(); return end
+
+		local speed = math.max(animSpeedValue.Value, 0)
+		elapsed += dt * speed
+		if anim.duration > 0 and elapsed >= anim.duration then
+			elapsed = elapsed % anim.duration
+			for _, name in ipairs(anim.joints) do cursors[name]=1 end
+		end
+
+		local t = elapsed
+		for _, entry in ipairs(jointData) do
+			local motor = entry.motor; local pn = entry.partName
+			if not motor or not motor.Parent then continue end
+			local tl = anim.timeline[pn]
+			if not tl then motor.C0 = entry.origC0; continue end
+			local n = #tl
+			if t <= tl[1].t then motor.C0 = entry.origC0*tl[1].cf; continue end
+			if t >= tl[n].t then motor.C0 = entry.origC0*tl[n].cf; continue end
+			local cursor = cursors[pn] or 1
+			while cursor < n-1 and tl[cursor+1].t <= t do cursor+=1 end
+			cursors[pn] = cursor
+			local kA, kB = tl[cursor], tl[cursor+1]
+			local span = kB.t-kA.t
+			local raw  = (span>0) and math.clamp((t-kA.t)/span,0,1) or 0
+			motor.C0   = entry.origC0 * kA.cf:Lerp(kB.cf, applyEasing(raw, kA.es, kA.ed))
+		end
+	end)
+end
+
+inDuoSession.Changed:Connect(function(active)
+	if not active then stopPlayback() end
+end)
+
+playEvent.Event:Connect(function(cat, animName)
+	if inDuoSession.Value then return end
+	if currentCat == cat and currentName == animName then
+		stopPlayback()
+	else
+		startPlayback(cat, animName)
+	end
+end)
+
+player.CharacterAdded:Connect(function()
+	stopPlayback()
+end)
