@@ -1,0 +1,305 @@
+-- BottomBar.lua  (LocalScript – StarterPlayerScripts or StarterGui)
+-- Updated: adds PHOTO button (index 4)
+
+local Players           = game:GetService("Players")
+local TweenService      = game:GetService("TweenService")
+local RunService        = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local player = Players.LocalPlayer
+
+local function getOrMakeFolder(parent, name)
+	local f = parent:FindFirstChild(name)
+	if not f then f = Instance.new("Folder"); f.Name = name; f.Parent = parent end
+	return f
+end
+local function getOrMakeEvent(folder, name)
+	local e = folder:FindFirstChild(name)
+	if not e then e = Instance.new("BindableEvent"); e.Name = name; e.Parent = folder end
+	return e
+end
+
+local BarEvents = getOrMakeFolder(ReplicatedStorage, "BarEvents")
+
+local APPS = {
+	{
+		icon      = "✦",
+		label     = "AVATAR",
+		EventName = "ToggleAvatarCustomizer",
+		accent    = Color3.fromRGB(255, 58, 58),
+		accentDk  = Color3.fromRGB(160, 18, 18),
+	},
+	{
+		icon      = "▶",
+		label     = "ANIMS",
+		EventName = "ToggleAnimBrowser",
+		accent    = Color3.fromRGB(255, 58, 58),
+		accentDk  = Color3.fromRGB(160, 18, 18),
+	},
+	{
+		icon      = "⊹",
+		label     = "POSE",
+		EventName = "TogglePoseEditor",
+		accent    = Color3.fromRGB(255, 58, 58),
+		accentDk  = Color3.fromRGB(160, 18, 18),
+	},
+	{
+		icon      = "◈",
+		label     = "PHOTO",
+		EventName = "TogglePhotoMode",
+		accent    = Color3.fromRGB(255, 58, 58),
+		accentDk  = Color3.fromRGB(160, 18, 18),
+	},
+	{
+		icon      = "✺",
+		label     = "LIGHTS",
+		EventName = "ToggleLightsEditor",
+		accent    = Color3.fromRGB(255, 58, 58),
+		accentDk  = Color3.fromRGB(160, 18, 18),
+	},
+}
+for _, app in ipairs(APPS) do getOrMakeEvent(BarEvents, app.EventName) end
+
+local T = {
+	Panel        = Color3.fromRGB(19, 11, 11),
+	PanelTop     = Color3.fromRGB(27, 16, 16),
+	ItemBg       = Color3.fromRGB(30, 17, 17),
+	ItemHover    = Color3.fromRGB(46, 24, 24),
+	Accent       = Color3.fromRGB(255, 58, 58),
+	AccentBright = Color3.fromRGB(255, 115, 115),
+	AccentDark   = Color3.fromRGB(160, 18, 18),
+	AccentDeep   = Color3.fromRGB(110, 10, 10),
+	Text         = Color3.fromRGB(255, 255, 255),
+	TextMuted    = Color3.fromRGB(108, 70, 70),
+	Stroke       = Color3.fromRGB(58, 30, 30),
+}
+
+local BTN_SZ  = 50
+local BTN_PAD = 14
+-- Bar auto-widens for any number of apps
+local BAR_W   = #APPS * (BTN_SZ + BTN_PAD) + BTN_PAD + 30
+local BAR_H   = 82
+local HDL_W   = 96
+local HDL_H   = 20
+local GAP     = 4
+
+local TS      = TweenInfo.new(0.40, Enum.EasingStyle.Quart, Enum.EasingDirection.Out)
+local TS_FAST = TweenInfo.new(0.16, Enum.EasingStyle.Quart, Enum.EasingDirection.Out)
+
+local function corner(p, r)
+	local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0, r or 8); c.Parent = p; return c
+end
+local function uistroke(p, col, thick)
+	local s = Instance.new("UIStroke"); s.Color = col or T.Stroke; s.Thickness = thick or 1
+	s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border; s.Parent = p; return s
+end
+local function gradient(p, c0, c1, rot)
+	local g = Instance.new("UIGradient")
+	g.Color = ColorSequence.new{ColorSequenceKeypoint.new(0,c0), ColorSequenceKeypoint.new(1,c1)}
+	g.Rotation = rot or 90; g.Parent = p; return g
+end
+
+local gui = Instance.new("ScreenGui")
+gui.Name = "BottomBarGUI"; gui.ResetOnSpawn = false
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+gui.IgnoreGuiInset = true; gui.Parent = player:WaitForChild("PlayerGui")
+
+local handle = Instance.new("TextButton")
+handle.Name = "BarHandle"; handle.Size = UDim2.new(0, HDL_W, 0, HDL_H)
+handle.AnchorPoint = Vector2.new(0.5, 1); handle.Position = UDim2.new(0.5, 0, 1, 0)
+handle.BackgroundColor3 = T.Panel; handle.Text = ""; handle.ZIndex = 22; handle.Parent = gui
+corner(handle, 10); uistroke(handle, T.Stroke, 1); gradient(handle, T.PanelTop, T.Panel, 90)
+
+for i = 1, 3 do
+	local grip = Instance.new("Frame")
+	grip.Size = UDim2.new(0,22,0,2); grip.Position = UDim2.new(0.5,-11,0,5+(i-1)*5)
+	grip.BackgroundColor3 = T.Accent; grip.BackgroundTransparency = 0.6
+	grip.BorderSizePixel = 0; grip.ZIndex = 23; grip.Parent = handle; corner(grip, 1)
+end
+
+local POS_CLOSED = UDim2.new(0.5, 0, 1, 4)
+local POS_OPEN   = UDim2.new(0.5, 0, 1, -(BAR_H + HDL_H + GAP))
+
+local bar = Instance.new("Frame")
+bar.Name = "BarBody"; bar.Size = UDim2.new(0, BAR_W, 0, BAR_H)
+bar.AnchorPoint = Vector2.new(0.5, 0); bar.Position = POS_CLOSED
+bar.BackgroundColor3 = T.Panel; bar.ClipsDescendants = true
+bar.ZIndex = 21; bar.Parent = gui
+corner(bar, 14); uistroke(bar, T.Stroke, 1.5)
+
+local barBg = Instance.new("UIGradient")
+barBg.Color = ColorSequence.new{
+	ColorSequenceKeypoint.new(0,    Color3.fromRGB(29, 16, 16)),
+	ColorSequenceKeypoint.new(0.55, Color3.fromRGB(18, 10, 10)),
+	ColorSequenceKeypoint.new(1,    Color3.fromRGB(11,  6,  6)),
+}
+barBg.Rotation = 20; barBg.Parent = bar
+
+local topLine = Instance.new("Frame")
+topLine.Size = UDim2.new(1,-28,0,2); topLine.Position = UDim2.new(0,14,0,1)
+topLine.BackgroundColor3 = Color3.new(1,1,1); topLine.BorderSizePixel = 0
+topLine.ZIndex = 22; topLine.Parent = bar
+gradient(topLine, T.AccentDeep, T.Accent, 0); corner(topLine, 1)
+
+local rng = Random.new()
+local particles = {}
+local pHost = Instance.new("Frame")
+pHost.Size = UDim2.new(1,0,1,0); pHost.BackgroundTransparency = 1; pHost.ZIndex = 21; pHost.Parent = bar
+
+for i = 1, 10 do
+	local p = Instance.new("Frame"); local sz = rng:NextNumber(3,14)
+	p.Size = UDim2.new(0,sz,0,sz)
+	p.BackgroundColor3 = (i%3==0) and T.AccentBright or T.Accent
+	p.BackgroundTransparency = rng:NextNumber(0.91,0.97)
+	p.BorderSizePixel = 0; p.ZIndex = 21; corner(p, 50); p.Parent = pHost
+	table.insert(particles, {
+		gui=p, baseX=rng:NextNumber(0,1), y=rng:NextNumber(0,1),
+		speed=rng:NextNumber(0.010,0.038), amp=rng:NextNumber(0.010,0.038),
+		freq=rng:NextNumber(0.5,2.0), seed=rng:NextNumber(0,math.pi*2),
+	})
+end
+
+local btnHolder = Instance.new("Frame")
+btnHolder.Size = UDim2.new(1,0,1,-8); btnHolder.Position = UDim2.new(0,0,0,8)
+btnHolder.BackgroundTransparency = 1; btnHolder.ZIndex = 23; btnHolder.Parent = bar
+
+local listLayout = Instance.new("UIListLayout")
+listLayout.FillDirection = Enum.FillDirection.Horizontal
+listLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+listLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+listLayout.Padding = UDim.new(0, BTN_PAD)
+listLayout.SortOrder = Enum.SortOrder.LayoutOrder; listLayout.Parent = btnHolder
+
+local barOpen = false
+local isTransitioning = false
+local appHandles = {}
+
+local function closeAllApps()
+	for _, h in pairs(appHandles) do
+		if h.isOn then h.setOn(false); h.event:Fire(false) end
+	end
+end
+
+local function setBarOpen(state)
+	if isTransitioning then return end
+	isTransitioning = true; barOpen = state
+	if not state then closeAllApps() end
+	TweenService:Create(bar, TS, {Position = state and POS_OPEN or POS_CLOSED}):Play()
+	for _, g in ipairs(handle:GetChildren()) do
+		if g:IsA("Frame") then
+			TweenService:Create(g, TS_FAST, {BackgroundTransparency = state and 0.15 or 0.6}):Play()
+		end
+	end
+	task.delay(0.42, function() isTransitioning = false end)
+end
+
+handle.MouseEnter:Connect(function()
+	TweenService:Create(handle, TS_FAST, {Size=UDim2.new(0,HDL_W+14,0,HDL_H+2)}):Play()
+end)
+handle.MouseLeave:Connect(function()
+	TweenService:Create(handle, TS_FAST, {Size=UDim2.new(0,HDL_W,0,HDL_H)}):Play()
+end)
+handle.MouseButton1Click:Connect(function() setBarOpen(not barOpen) end)
+
+local function makeAppButton(app, index)
+	local event = getOrMakeEvent(BarEvents, app.EventName)
+
+	local container = Instance.new("Frame")
+	container.Name = "App_"..app.EventName; container.Size = UDim2.new(0,BTN_SZ,1,0)
+	container.BackgroundTransparency = 1; container.LayoutOrder = index
+	container.ZIndex = 24; container.Parent = btnHolder
+
+	local btn = Instance.new("TextButton")
+	btn.Size = UDim2.new(0,BTN_SZ,0,BTN_SZ); btn.Position = UDim2.new(0.5,0,0.5,0)
+	btn.AnchorPoint = Vector2.new(0.5,0.5); btn.BackgroundColor3 = T.ItemBg
+	btn.Text = ""; btn.ZIndex = 25; btn.Parent = container
+	corner(btn, 14)
+	local btnStroke = uistroke(btn, T.Stroke, 1.5)
+	gradient(btn, app.accentDk or T.AccentDark, T.ItemBg, 135)
+
+	local iconLbl = Instance.new("TextLabel")
+	iconLbl.Size = UDim2.new(1,0,1,0); iconLbl.BackgroundTransparency = 1
+	iconLbl.Text = app.icon; iconLbl.TextColor3 = app.accent or T.Accent; iconLbl.TextSize = 22
+	iconLbl.Font = Enum.Font.GothamBlack
+	iconLbl.TextXAlignment = Enum.TextXAlignment.Center
+	iconLbl.TextYAlignment = Enum.TextYAlignment.Center
+	iconLbl.ZIndex = 26; iconLbl.Parent = btn
+
+	local nameLbl = Instance.new("TextLabel")
+	nameLbl.Size = UDim2.new(1,0,0,13); nameLbl.Position = UDim2.new(0.5,0,1,2)
+	nameLbl.AnchorPoint = Vector2.new(0.5,0); nameLbl.BackgroundTransparency = 1
+	nameLbl.Text = app.label; nameLbl.TextColor3 = T.TextMuted; nameLbl.TextSize = 8
+	nameLbl.Font = Enum.Font.GothamBold; nameLbl.TextXAlignment = Enum.TextXAlignment.Center
+	nameLbl.ZIndex = 25; nameLbl.Parent = btn
+
+	local ring = Instance.new("Frame")
+	ring.Size = UDim2.new(1,6,1,6); ring.Position = UDim2.new(0.5,0,0.5,0)
+	ring.AnchorPoint = Vector2.new(0.5,0.5); ring.BackgroundTransparency = 1
+	ring.ZIndex = 24; ring.Parent = btn; corner(ring, 16)
+	local ringStroke = Instance.new("UIStroke")
+	ringStroke.Color = app.accent or T.Accent; ringStroke.Thickness = 1.5
+	ringStroke.Transparency = 1; ringStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+	ringStroke.Parent = ring
+
+	local isOn = false
+	local function setOn(state)
+		isOn = state
+		if appHandles[app.EventName] then appHandles[app.EventName].isOn = state end
+		if state then
+			TweenService:Create(btnStroke, TS_FAST, {Color=app.accent or T.Accent, Thickness=2}):Play()
+			TweenService:Create(iconLbl,   TS_FAST, {TextColor3=T.Text}):Play()
+			TweenService:Create(nameLbl,   TS_FAST, {TextColor3=app.accent or T.Accent}):Play()
+		else
+			TweenService:Create(btnStroke, TS_FAST, {Color=T.Stroke, Thickness=1.5}):Play()
+			TweenService:Create(iconLbl,   TS_FAST, {TextColor3=app.accent or T.Accent}):Play()
+			TweenService:Create(nameLbl,   TS_FAST, {TextColor3=T.TextMuted}):Play()
+		end
+	end
+
+	btn.MouseEnter:Connect(function()
+		TweenService:Create(btn,        TS_FAST, {BackgroundColor3=T.ItemHover}):Play()
+		TweenService:Create(ringStroke, TS_FAST, {Transparency=0.4}):Play()
+		TweenService:Create(btn,        TS_FAST, {Size=UDim2.new(0,BTN_SZ+4,0,BTN_SZ+4)}):Play()
+	end)
+	btn.MouseLeave:Connect(function()
+		if not isOn then TweenService:Create(btn, TS_FAST, {BackgroundColor3=T.ItemBg}):Play() end
+		TweenService:Create(ringStroke, TS_FAST, {Transparency=1}):Play()
+		TweenService:Create(btn,        TS_FAST, {Size=UDim2.new(0,BTN_SZ,0,BTN_SZ)}):Play()
+	end)
+	btn.MouseButton1Click:Connect(function()
+		TweenService:Create(btn, TweenInfo.new(0.07,Enum.EasingStyle.Back,Enum.EasingDirection.In),
+			{Size=UDim2.new(0,BTN_SZ-5,0,BTN_SZ-5)}):Play()
+		task.delay(0.08, function()
+			TweenService:Create(btn, TweenInfo.new(0.20,Enum.EasingStyle.Back,Enum.EasingDirection.Out),
+				{Size=UDim2.new(0,BTN_SZ,0,BTN_SZ)}):Play()
+		end)
+		setOn(not isOn); event:Fire(isOn)
+	end)
+
+	appHandles[app.EventName] = {setOn=setOn, event=event, isOn=false}
+end
+
+for i, app in ipairs(APPS) do makeAppButton(app, i) end
+
+task.spawn(function()
+	for _, app in ipairs(APPS) do
+		local ev = BarEvents:WaitForChild(app.EventName, 10)
+		if ev then
+			local name = app.EventName
+			ev.Event:Connect(function(state)
+				local h = appHandles[name]
+				if h and type(state) == "boolean" then h.setOn(state) end
+			end)
+		end
+	end
+end)
+
+RunService.RenderStepped:Connect(function(dt)
+	barBg.Rotation = (barBg.Rotation + dt * 5) % 360
+	for _, p in ipairs(particles) do
+		p.y -= p.speed * dt
+		if p.y < -0.1 then p.y = 1.08; p.baseX = rng:NextNumber(0,1) end
+		local xOff = math.sin(tick() * p.freq + p.seed) * p.amp
+		p.gui.Position = UDim2.new(p.baseX + xOff, 0, p.y, 0)
+	end
+end)
