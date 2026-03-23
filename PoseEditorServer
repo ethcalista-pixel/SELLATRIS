@@ -1,0 +1,124 @@
+-- PoseEditor_Server.lua  (Script – ServerScriptService)
+
+local Players           = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local function getOrMakeRemote(name)
+	local r = ReplicatedStorage:FindFirstChild(name)
+	if not r then r = Instance.new("RemoteEvent"); r.Name = name; r.Parent = ReplicatedStorage end
+	return r
+end
+
+local applyPoseRemote = getOrMakeRemote("ApplyPose")
+local anchorRemote    = getOrMakeRemote("SetPoseAnchor")
+
+local JOINT_MAP = {
+	["Head"]      = { joint="Neck",           parent="Torso"            },
+	["Torso"]     = { joint="RootJoint",      parent="HumanoidRootPart" },
+	["Left Arm"]  = { joint="Left Shoulder",  parent="Torso"            },
+	["Right Arm"] = { joint="Right Shoulder", parent="Torso"            },
+	["Left Leg"]  = { joint="Left Hip",       parent="Torso"            },
+	["Right Leg"] = { joint="Right Hip",      parent="Torso"            },
+}
+
+-- Only anchor HumanoidRootPart.
+-- Every other part is Motor6D Part1 — anchoring Part1 makes the joint
+-- stop working entirely. HRP anchored is enough to freeze the whole rig.
+local ANCHOR_PARTS = { "HumanoidRootPart" }
+
+local origCache  = {}  -- [userId][limbName] = original Motor6D C0
+local savedStats = {}  -- [userId] = { WalkSpeed, JumpPower }
+
+local function cacheForChar(char, userId)
+	origCache[userId] = {}
+	for limbName, jInfo in pairs(JOINT_MAP) do
+		local pp = char:FindFirstChild(jInfo.parent)
+		if pp then
+			local m = pp:FindFirstChild(jInfo.joint)
+			if m and m:IsA("Motor6D") then
+				origCache[userId][limbName] = m.C0
+			end
+		end
+	end
+end
+
+Players.PlayerAdded:Connect(function(player)
+	player.CharacterAdded:Connect(function(char)
+		task.wait(0.5)
+		cacheForChar(char, player.UserId)
+		local hum = char:FindFirstChildWhichIsA("Humanoid")
+		if hum then
+			savedStats[player.UserId] = { WalkSpeed = hum.WalkSpeed, JumpPower = hum.JumpPower }
+		end
+	end)
+end)
+Players.PlayerRemoving:Connect(function(p)
+	origCache[p.UserId]  = nil
+	savedStats[p.UserId] = nil
+end)
+
+-- ── ApplyPose ─────────────────────────────────────────────────────────────────
+applyPoseRemote.OnServerEvent:Connect(function(player, snapshot)
+	local char = player.Character
+	if not char or type(snapshot) ~= "table" then return end
+	if not origCache[player.UserId] then cacheForChar(char, player.UserId) end
+	local cache = origCache[player.UserId]
+
+	for limbName, jInfo in pairs(JOINT_MAP) do
+		local pp = char:FindFirstChild(jInfo.parent)
+		if not pp then continue end
+		local motor = pp:FindFirstChild(jInfo.joint)
+		if not motor or not motor:IsA("Motor6D") then continue end
+		local newC0 = snapshot[limbName]
+		if typeof(newC0) == "CFrame" then
+			motor.C0 = newC0
+		else
+			local orig = cache and cache[limbName]
+			if orig then motor.C0 = orig end
+		end
+	end
+end)
+
+-- ── SetPoseAnchor ─────────────────────────────────────────────────────────────
+-- true  = anchor every body part + freeze humanoid state
+-- false = unanchor every body part + restore movement
+anchorRemote.OnServerEvent:Connect(function(player, shouldAnchor)
+	local char = player.Character
+	if not char then return end
+	local hum = char:FindFirstChildWhichIsA("Humanoid")
+
+	if shouldAnchor then
+		-- Save humanoid movement stats before zeroing them
+		if hum and not savedStats[player.UserId] then
+			savedStats[player.UserId] = { WalkSpeed = hum.WalkSpeed, JumpPower = hum.JumpPower }
+		end
+		if hum then
+			hum.WalkSpeed = 0
+			hum.JumpPower = 0
+			-- Stop the humanoid state machine fighting our joint edits
+			hum:ChangeState(Enum.HumanoidStateType.None)
+		end
+		-- Anchor EVERY body part so physics cannot move or rotate anything
+		for _, partName in ipairs(ANCHOR_PARTS) do
+			local p = char:FindFirstChild(partName)
+			if p and p:IsA("BasePart") then
+				p.Anchored = true
+			end
+		end
+	else
+		-- Unanchor all parts first so physics can resume naturally
+		for _, partName in ipairs(ANCHOR_PARTS) do
+			local p = char:FindFirstChild(partName)
+			if p and p:IsA("BasePart") then
+				p.Anchored = false
+			end
+		end
+		-- Resume humanoid
+		if hum then
+			hum:ChangeState(Enum.HumanoidStateType.GettingUp)
+			local s = savedStats[player.UserId]
+			hum.WalkSpeed = s and s.WalkSpeed or 16
+			hum.JumpPower = s and s.JumpPower or 50
+		end
+	end
+end)
