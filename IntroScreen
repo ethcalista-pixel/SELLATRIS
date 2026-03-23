@@ -1,0 +1,937 @@
+-- IntroScreen (LocalScript)
+-- Place directly inside StarterPlayerScripts
+-- Requires MenuCamera ModuleScript to be in ReplicatedStorage.
+
+-- ═══════════════════════════════════════════════════════════
+--  ASSET IDs  ← swap these for your own assets
+-- ═══════════════════════════════════════════════════════════
+local IMAGE_ID = "rbxassetid://17726943419"
+
+local SFX = {
+	AmbientMusic = { id = "rbxassetid://123333172336869", vol = 0.55 },  -- looping background track during loading
+	WhooshShoot  = { id = "rbxassetid://127183292018512", vol = 0.80 },  -- star shoots left
+	LandImpact   = { id = "rbxassetid://136730840543746", vol = 0.90 },  -- star thuds into left position
+	TitleSting   = { id = "rbxassetid://113189786881869", vol = 0.75 },  -- SELLATRIS text reveal accent
+	ButtonHover  = { id = "rbxassetid://84377433855544",  vol = 0.45 },  -- mouse enters play button
+	ButtonClick  = { id = "rbxassetid://140404505414006", vol = 0.80 },  -- play button pressed
+}
+
+-- ═══════════════════════════════════════════════════════════
+--  Services
+-- ═══════════════════════════════════════════════════════════
+local Players            = game:GetService("Players")
+local TweenService       = game:GetService("TweenService")
+local RunService         = game:GetService("RunService")
+local SoundService       = game:GetService("SoundService")
+local ReplicatedStorage  = game:GetService("ReplicatedStorage")
+
+local player    = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+
+-- ═══════════════════════════════════════════════════════════
+--  Start MenuCamera
+--  (runs in parallel — it watches for IntroScreen removal itself)
+-- ═══════════════════════════════════════════════════════════
+local menuCameraModule = ReplicatedStorage.MODULES.Menucamera
+if menuCameraModule then
+	task.spawn(function()
+		require(menuCameraModule).start()
+	end)
+else
+	warn("[IntroScreen] MenuCamera ModuleScript not found in ReplicatedStorage – skipping camera.")
+end
+
+-- ═══════════════════════════════════════════════════════════
+--  Theme
+-- ═══════════════════════════════════════════════════════════
+local T = {
+	Bg          = Color3.fromRGB(6,   2,   2),
+	Panel       = Color3.fromRGB(14,  8,   8),
+	Accent      = Color3.fromRGB(255, 58,  58),
+	AccentBright= Color3.fromRGB(255, 130, 130),
+	AccentDark  = Color3.fromRGB(160, 18,  18),
+	AccentDeep  = Color3.fromRGB(110, 10,  10),
+	Text        = Color3.fromRGB(255, 255, 255),
+	TextDim     = Color3.fromRGB(200, 180, 180),
+	TextMuted   = Color3.fromRGB(140, 80,  80),
+	Stroke      = Color3.fromRGB(58,  30,  30),
+	FlameCore   = Color3.fromRGB(130, 15,  30),
+	FlameOuter  = Color3.fromRGB(65,  6,   15),
+	FlameTip    = Color3.fromRGB(20,  3,   7),
+}
+
+-- ═══════════════════════════════════════════════════════════
+--  Sounds
+-- ═══════════════════════════════════════════════════════════
+local sounds = {}
+local function makeSound(id, volume, looped)
+	local s        = Instance.new("Sound")
+	s.SoundId      = id
+	s.Volume       = volume
+	s.Looped       = looped or false
+	s.Parent       = SoundService
+	sounds[#sounds + 1] = s
+	return s
+end
+
+local sAmbient = makeSound(SFX.AmbientMusic.id, SFX.AmbientMusic.vol, true)
+local sWhoosh  = makeSound(SFX.WhooshShoot.id,  SFX.WhooshShoot.vol,  false)
+local sImpact  = makeSound(SFX.LandImpact.id,   SFX.LandImpact.vol,   false)
+local sSting   = makeSound(SFX.TitleSting.id,   SFX.TitleSting.vol,   false)
+local sHover   = makeSound(SFX.ButtonHover.id,  SFX.ButtonHover.vol,  false)
+local sClick   = makeSound(SFX.ButtonClick.id,  SFX.ButtonClick.vol,  false)
+
+local function safePlay(s)
+	if s and s.SoundId ~= "rbxassetid://0" and s.SoundId ~= "" then
+		s:Play()
+	end
+end
+
+local function fadeOutAllSounds(duration)
+	for _, s in ipairs(sounds) do
+		if s and s.Parent then
+			TweenService:Create(s,
+				TweenInfo.new(duration, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
+				{ Volume = 0 }):Play()
+		end
+	end
+end
+
+safePlay(sAmbient)
+
+-- ═══════════════════════════════════════════════════════════
+--  ScreenGui
+-- ═══════════════════════════════════════════════════════════
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name           = "IntroScreen"
+screenGui.IgnoreGuiInset = true
+screenGui.ResetOnSpawn   = false
+screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+screenGui.Parent         = playerGui
+
+-- ─────────────────────────────────────────────────────────
+--  Helpers
+-- ─────────────────────────────────────────────────────────
+local function tw(obj, info, props)
+	local t = TweenService:Create(obj, info, props); t:Play(); return t
+end
+local function twWait(obj, info, props)
+	local t = TweenService:Create(obj, info, props); t:Play(); t.Completed:Wait()
+end
+local function corner(obj, r)
+	Instance.new("UICorner", obj).CornerRadius = UDim.new(0, r or 8)
+end
+local function stroke(obj, col, thick)
+	local s = Instance.new("UIStroke")
+	s.Color = col; s.Thickness = thick or 1.5
+	s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+	s.Parent = obj; return s
+end
+
+-- ═══════════════════════════════════════════════════════════
+--  LAYER 1 — solid base
+-- ═══════════════════════════════════════════════════════════
+local bgBase = Instance.new("Frame")
+bgBase.Size             = UDim2.fromScale(1, 1)
+bgBase.BackgroundColor3 = T.Bg
+bgBase.BorderSizePixel  = 0
+bgBase.ZIndex           = 1
+bgBase.Parent           = screenGui
+
+-- ═══════════════════════════════════════════════════════════
+--  LAYER 2 — flame (CanvasGroup for clean group-fade)
+-- ═══════════════════════════════════════════════════════════
+local flameCanvas = Instance.new("CanvasGroup")
+flameCanvas.Size             = UDim2.fromScale(1, 1)
+flameCanvas.BackgroundTransparency = 1
+flameCanvas.GroupTransparency = 0
+flameCanvas.BorderSizePixel  = 0
+flameCanvas.ZIndex           = 2
+flameCanvas.Parent           = screenGui
+
+local flameFrame = Instance.new("Frame")
+flameFrame.Size             = UDim2.fromScale(1, 1)
+flameFrame.BackgroundColor3 = T.FlameCore
+flameFrame.BorderSizePixel  = 0
+flameFrame.ZIndex           = 2
+flameFrame.Parent           = flameCanvas
+
+local flameGrad = Instance.new("UIGradient")
+flameGrad.Color = ColorSequence.new({
+	ColorSequenceKeypoint.new(0,    T.FlameCore),
+	ColorSequenceKeypoint.new(0.20, T.FlameOuter),
+	ColorSequenceKeypoint.new(0.48, T.FlameTip),
+	ColorSequenceKeypoint.new(1,    T.Bg),
+})
+flameGrad.Transparency = NumberSequence.new({
+	NumberSequenceKeypoint.new(0,    0),
+	NumberSequenceKeypoint.new(0.25, 0),
+	NumberSequenceKeypoint.new(0.55, 0.5),
+	NumberSequenceKeypoint.new(1,    1),
+})
+flameGrad.Rotation = 270
+flameGrad.Parent   = flameFrame
+
+-- ═══════════════════════════════════════════════════════════
+--  LAYER 3 — vignette (darkens top)
+-- ═══════════════════════════════════════════════════════════
+local vigCanvas = Instance.new("CanvasGroup")
+vigCanvas.Size             = UDim2.fromScale(1, 1)
+vigCanvas.BackgroundTransparency = 1
+vigCanvas.GroupTransparency = 0
+vigCanvas.BorderSizePixel  = 0
+vigCanvas.ZIndex           = 3
+vigCanvas.Parent           = screenGui
+
+local vigFrame = Instance.new("Frame")
+vigFrame.Size             = UDim2.fromScale(1, 1)
+vigFrame.BackgroundColor3 = T.Bg
+vigFrame.BorderSizePixel  = 0
+vigFrame.ZIndex           = 3
+vigFrame.Parent           = vigCanvas
+
+local vigGrad = Instance.new("UIGradient")
+vigGrad.Transparency = NumberSequence.new({
+	NumberSequenceKeypoint.new(0,   1),
+	NumberSequenceKeypoint.new(0.5, 0.92),
+	NumberSequenceKeypoint.new(1,   0),
+})
+vigGrad.Rotation = 270
+vigGrad.Parent   = vigFrame
+
+-- ═══════════════════════════════════════════════════════════
+--  LAYER 4 — ember particles
+-- ═══════════════════════════════════════════════════════════
+local rng       = Random.new()
+local particles = {}
+
+local pHost = Instance.new("Frame")
+pHost.Size                   = UDim2.fromScale(1, 1)
+pHost.BackgroundTransparency = 1
+pHost.ZIndex                 = 4
+pHost.Parent                 = screenGui
+
+for i = 1, 28 do
+	local sz = rng:NextNumber(3, 16)
+	local p  = Instance.new("Frame")
+	p.Size             = UDim2.fromOffset(sz, sz)
+	p.BackgroundColor3 = (i % 4 == 0) and T.AccentBright
+		or (i % 3 == 0) and T.FlameCore
+		or T.Accent
+	p.BackgroundTransparency = rng:NextNumber(0.65, 0.90)
+	p.BorderSizePixel  = 0
+	p.ZIndex           = 4
+	Instance.new("UICorner", p).CornerRadius = UDim.new(1, 0)
+	p.Parent = pHost
+	local bx = rng:NextNumber(0, 1)
+	local by = rng:NextNumber(0, 1)
+	table.insert(particles, {
+		gui   = p,
+		x = bx, baseX = bx,
+		y = by, baseY = by,
+		speed = rng:NextNumber(0.012, 0.050),
+		amp   = rng:NextNumber(0.010, 0.040),
+		freq  = rng:NextNumber(0.4,   2.4),
+		seed  = rng:NextNumber(0, math.pi * 2),
+	})
+end
+
+local dirBlend       = 0
+local dirBlendTarget = 0
+local DIR_BLEND_SPEED = 1.4
+
+-- ═══════════════════════════════════════════════════════════
+--  LAYER 5 — scanlines (subtle depth texture)
+-- ═══════════════════════════════════════════════════════════
+local scanCanvas = Instance.new("CanvasGroup")
+scanCanvas.Size             = UDim2.fromScale(1, 1)
+scanCanvas.BackgroundTransparency = 1
+scanCanvas.GroupTransparency = 0.94   -- barely visible — just a texture hint
+scanCanvas.BorderSizePixel  = 0
+scanCanvas.ZIndex           = 5
+scanCanvas.Parent           = screenGui
+
+for i = 0, 59 do
+	local line = Instance.new("Frame")
+	line.Size             = UDim2.new(1, 0, 0, 1)
+	line.Position         = UDim2.new(0, 0, i / 60, 0)
+	line.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+	line.BorderSizePixel  = 0
+	line.ZIndex           = 5
+	line.Parent           = scanCanvas
+end
+
+-- ═══════════════════════════════════════════════════════════
+--  LOGO — halo ring + star
+-- ═══════════════════════════════════════════════════════════
+local LOGO_SIZE = 220
+
+-- Outer glow blob (soft circle behind the star)
+local logoGlow = Instance.new("ImageLabel")
+logoGlow.Name                   = "LogoGlow"
+logoGlow.Size                   = UDim2.fromOffset(LOGO_SIZE * 2, LOGO_SIZE * 2)
+logoGlow.AnchorPoint            = Vector2.new(0.5, 0.5)
+logoGlow.Position               = UDim2.fromScale(0.5, 0.5)
+logoGlow.BackgroundTransparency = 1
+logoGlow.Image                  = "rbxassetid://6401143468"
+logoGlow.ImageColor3            = T.Accent
+logoGlow.ImageTransparency      = 0.7
+logoGlow.ScaleType              = Enum.ScaleType.Fit
+logoGlow.ZIndex                 = 6
+logoGlow.Parent                 = screenGui
+
+-- Counter-rotating halo ring
+local haloRing = Instance.new("ImageLabel")
+haloRing.Name                   = "HaloRing"
+haloRing.Size                   = UDim2.fromOffset(LOGO_SIZE + 64, LOGO_SIZE + 64)
+haloRing.AnchorPoint            = Vector2.new(0.5, 0.5)
+haloRing.Position               = UDim2.fromScale(0.5, 0.5)
+haloRing.BackgroundTransparency = 1
+haloRing.Image                  = "rbxassetid://6401143468"
+haloRing.ImageColor3            = T.Accent
+haloRing.ImageTransparency      = 0.45
+haloRing.ScaleType              = Enum.ScaleType.Fit
+haloRing.ZIndex                 = 7
+haloRing.Parent                 = screenGui
+
+-- Star
+local logoImage = Instance.new("ImageLabel")
+logoImage.Name                   = "LogoImage"
+logoImage.Size                   = UDim2.fromOffset(LOGO_SIZE, LOGO_SIZE)
+logoImage.AnchorPoint            = Vector2.new(0.5, 0.5)
+logoImage.Position               = UDim2.fromScale(0.5, 0.5)
+logoImage.BackgroundTransparency = 1
+logoImage.Image                  = IMAGE_ID
+logoImage.ScaleType              = Enum.ScaleType.Fit
+logoImage.ZIndex                 = 8
+logoImage.Parent                 = screenGui
+
+-- ═══════════════════════════════════════════════════════════
+--  LOADING INDICATOR  (3 animated dots below the star)
+-- ═══════════════════════════════════════════════════════════
+local loadingFrame = Instance.new("CanvasGroup")
+loadingFrame.Size             = UDim2.fromOffset(80, 20)
+loadingFrame.AnchorPoint      = Vector2.new(0.5, 0)
+loadingFrame.Position         = UDim2.new(0.5, 0, 0.5, LOGO_SIZE / 2 + 22)
+loadingFrame.BackgroundTransparency = 1
+loadingFrame.GroupTransparency = 0
+loadingFrame.ZIndex           = 9
+loadingFrame.Parent           = screenGui
+
+local loadDots = {}
+for i = 1, 3 do
+	local dot = Instance.new("Frame")
+	dot.Size             = UDim2.fromOffset(10, 10)
+	dot.AnchorPoint      = Vector2.new(0.5, 0.5)
+	dot.Position         = UDim2.new((i - 1) / 2, 0, 0.5, 0)
+	dot.BackgroundColor3 = T.Accent
+	dot.BackgroundTransparency = 0.4
+	dot.BorderSizePixel  = 0
+	dot.ZIndex           = 9
+	Instance.new("UICorner", dot).CornerRadius = UDim.new(1, 0)
+	dot.Parent = loadingFrame
+	loadDots[i] = dot
+end
+
+-- ═══════════════════════════════════════════════════════════
+--  FLASH + SHOCKWAVE  (on shoot/land)
+-- ═══════════════════════════════════════════════════════════
+local flashFrame = Instance.new("Frame")
+flashFrame.Size             = UDim2.fromScale(1, 1)
+flashFrame.BackgroundColor3 = T.Accent
+flashFrame.BackgroundTransparency = 1
+flashFrame.BorderSizePixel  = 0
+flashFrame.ZIndex           = 20
+flashFrame.Parent           = screenGui
+
+local shockwave = Instance.new("ImageLabel")
+shockwave.Size                   = UDim2.fromOffset(0, 0)
+shockwave.AnchorPoint            = Vector2.new(0.5, 0.5)
+shockwave.Position               = UDim2.fromScale(0.5, 0.5)
+shockwave.BackgroundTransparency = 1
+shockwave.Image                  = "rbxassetid://6401143468"
+shockwave.ImageColor3            = T.Accent
+shockwave.ImageTransparency      = 0.2
+shockwave.ScaleType              = Enum.ScaleType.Fit
+shockwave.ZIndex                 = 15
+shockwave.Parent                 = screenGui
+
+-- ═══════════════════════════════════════════════════════════
+--  TITLE  "SELLATRIS" — per-letter labels for hover bounce
+-- ═══════════════════════════════════════════════════════════
+local TITLE_LEFT   = LOGO_SIZE + 32
+local TITLE_FONT   = Enum.Font.GothamBlack
+local TITLE_SIZE   = 82
+local BOUNCE_DIST  = 14   -- px upward on hover
+
+-- Container frame — positioned like the old single label
+local titleContainer = Instance.new("Frame")
+titleContainer.Name                   = "TitleContainer"
+titleContainer.Size                   = UDim2.fromOffset(600, TITLE_SIZE + BOUNCE_DIST + 8)
+titleContainer.AnchorPoint            = Vector2.new(0, 0.5)
+titleContainer.Position               = UDim2.new(0, TITLE_LEFT, 0.5, 0)
+titleContainer.BackgroundTransparency = 1
+titleContainer.ClipsDescendants       = false
+titleContainer.ZIndex                 = 9
+titleContainer.Parent                 = screenGui
+
+local titleLayout = Instance.new("UIListLayout")
+titleLayout.FillDirection         = Enum.FillDirection.Horizontal
+titleLayout.HorizontalAlignment   = Enum.HorizontalAlignment.Left
+titleLayout.VerticalAlignment     = Enum.VerticalAlignment.Bottom
+titleLayout.Padding               = UDim.new(0, 0)
+titleLayout.SortOrder             = Enum.SortOrder.LayoutOrder
+titleLayout.Parent                = titleContainer
+
+-- Build one label + padding per letter
+local LETTERS      = { "S","E","L","L","A","T","R","I","S" }
+local letterLabels = {}   -- { label, padding, stroke, bouncing }
+local titleStroke  = nil  -- set to first letter's stroke for compat; all strokes stored in letterLabels
+
+for i, char in ipairs(LETTERS) do
+	local lbl = Instance.new("TextLabel")
+	lbl.Name                   = "Letter_"..i
+	lbl.BackgroundTransparency = 1
+	lbl.Text                   = char
+	lbl.Font                   = TITLE_FONT
+	lbl.TextSize               = TITLE_SIZE
+	lbl.TextColor3             = T.Text
+	lbl.TextTransparency       = 1
+	lbl.AutomaticSize          = Enum.AutomaticSize.X
+	lbl.Size                   = UDim2.fromOffset(0, TITLE_SIZE + BOUNCE_DIST + 8)
+	lbl.LayoutOrder            = i
+	lbl.ZIndex                 = 9
+	lbl.Parent                 = titleContainer
+
+	local pad = Instance.new("UIPadding")
+	pad.PaddingTop    = UDim.new(0, BOUNCE_DIST + 4)  -- letters sit at resting baseline
+	pad.PaddingBottom = UDim.new(0, 0)
+	pad.Parent        = lbl
+
+	local st = Instance.new("UIStroke")
+	st.Color        = T.Accent
+	st.Thickness    = 2.5
+	st.Transparency = 1
+	st.Parent       = lbl
+
+	if i == 1 then titleStroke = st end  -- keep compat reference
+
+	local entry = { label = lbl, padding = pad, stroke = st, bouncing = false }
+	letterLabels[i] = entry
+
+	-- Hover bounce — only active after title is revealed (guarded by bouncing flag)
+	lbl.MouseEnter:Connect(function()
+		if lbl.TextTransparency > 0.5 then return end
+		if entry.bouncing then return end
+		entry.bouncing = true
+		TweenService:Create(pad,
+			TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+			{ PaddingTop = UDim.new(0, 0) }   -- bounce up
+		):Play()
+		TweenService:Create(lbl,
+			TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+			{ TextColor3 = T.AccentBright }
+		):Play()
+	end)
+	lbl.MouseLeave:Connect(function()
+		entry.bouncing = false
+		TweenService:Create(pad,
+			TweenInfo.new(0.18, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
+			{ PaddingTop = UDim.new(0, BOUNCE_DIST + 4) }   -- spring back down
+		):Play()
+		TweenService:Create(lbl,
+			TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+			{ TextColor3 = T.Text }
+		):Play()
+	end)
+end
+
+-- Helpers: tween all letters together (used for reveal / dismiss)
+local function setAllLettersTransparency(transparency, tweenInfo)
+	for _, e in ipairs(letterLabels) do
+		TweenService:Create(e.label, tweenInfo, { TextTransparency = transparency }):Play()
+	end
+end
+local function setAllStrokesTransparency(transparency, tweenInfo)
+	for _, e in ipairs(letterLabels) do
+		TweenService:Create(e.stroke, tweenInfo, { Transparency = transparency }):Play()
+	end
+end
+local function setAllStrokesColor(color, tweenInfo)
+	for _, e in ipairs(letterLabels) do
+		TweenService:Create(e.stroke, tweenInfo, { Color = color }):Play()
+	end
+end
+
+-- Keep a compat alias so existing code referencing titleLabel still works
+-- (used for Position tweens — we tween the container instead)
+local titleLabel = titleContainer
+
+-- Accent underline that sweeps out from zero width
+local titleUnderline = Instance.new("Frame")
+titleUnderline.Size             = UDim2.fromOffset(0, 3)
+titleUnderline.AnchorPoint      = Vector2.new(0, 0)
+titleUnderline.Position         = UDim2.new(0, TITLE_LEFT, 0.5, 48)
+titleUnderline.BackgroundColor3 = Color3.new(1, 1, 1)
+titleUnderline.BorderSizePixel  = 0
+titleUnderline.ZIndex           = 9
+titleUnderline.Parent           = screenGui
+Instance.new("UICorner", titleUnderline).CornerRadius = UDim.new(1, 0)
+local underlineGrad = Instance.new("UIGradient")
+underlineGrad.Color = ColorSequence.new({
+	ColorSequenceKeypoint.new(0, T.AccentDeep),
+	ColorSequenceKeypoint.new(1, T.Accent),
+})
+underlineGrad.Rotation = 0
+underlineGrad.Parent   = titleUnderline
+
+-- Subtitle
+local subtitleLabel = Instance.new("TextLabel")
+subtitleLabel.Size                   = UDim2.fromOffset(580, 28)
+subtitleLabel.AnchorPoint            = Vector2.new(0, 0)
+subtitleLabel.Position               = UDim2.new(0, TITLE_LEFT + 4, 0.5, 60)
+subtitleLabel.BackgroundTransparency = 1
+subtitleLabel.Text                   = "PRESS PLAY TO BEGIN"
+subtitleLabel.Font                   = Enum.Font.GothamBold
+subtitleLabel.TextSize               = 13
+subtitleLabel.TextColor3             = T.TextMuted
+subtitleLabel.TextXAlignment         = Enum.TextXAlignment.Left
+subtitleLabel.TextTransparency       = 1
+subtitleLabel.ZIndex                 = 9
+subtitleLabel.Parent                 = screenGui
+
+-- ═══════════════════════════════════════════════════════════
+--  CORNER BRACKET DECORATIONS
+--  Thin red L-shapes in each screen corner — pure style detail
+-- ═══════════════════════════════════════════════════════════
+local BRACKET_LEN  = 32
+local BRACKET_TICK = 2
+local BRACKET_COL  = T.AccentDeep
+
+local cornerDefs = {
+	{ ax=0,   ay=0,   bx=0,   by=0,   hW=BRACKET_LEN, hH=BRACKET_TICK, vW=BRACKET_TICK, vH=BRACKET_LEN },  -- TL
+	{ ax=1,   ay=0,   bx=1,   by=0,   hW=BRACKET_LEN, hH=BRACKET_TICK, vW=BRACKET_TICK, vH=BRACKET_LEN,
+		hOX=-(BRACKET_LEN), vOX=-(BRACKET_TICK) },   -- TR
+	{ ax=0,   ay=1,   bx=0,   by=1,   hW=BRACKET_LEN, hH=BRACKET_TICK, vW=BRACKET_TICK, vH=BRACKET_LEN,
+		hOY=-(BRACKET_TICK), vOY=-(BRACKET_LEN) },   -- BL
+	{ ax=1,   ay=1,   bx=1,   by=1,   hW=BRACKET_LEN, hH=BRACKET_TICK, vW=BRACKET_TICK, vH=BRACKET_LEN,
+		hOX=-(BRACKET_LEN), hOY=-(BRACKET_TICK), vOX=-(BRACKET_TICK), vOY=-(BRACKET_LEN) }, -- BR
+}
+
+local bracketParts = {}
+for _, d in ipairs(cornerDefs) do
+	for _, isVert in ipairs({false, true}) do
+		local f = Instance.new("Frame")
+		f.BackgroundColor3 = BRACKET_COL
+		f.BorderSizePixel  = 0
+		f.ZIndex           = 12
+		f.BackgroundTransparency = 1  -- hidden initially
+		if isVert then
+			f.Size     = UDim2.fromOffset(d.vW, d.vH)
+			f.Position = UDim2.new(d.ax, (d.vOX or 0), d.ay, (d.vOY or 0))
+		else
+			f.Size     = UDim2.fromOffset(d.hW, d.hH)
+			f.Position = UDim2.new(d.ax, (d.hOX or 0), d.ay, (d.hOY or 0))
+		end
+		f.Parent = screenGui
+		table.insert(bracketParts, f)
+	end
+end
+
+-- ═══════════════════════════════════════════════════════════
+--  PLAY BUTTON  — left-aligned, small
+-- ═══════════════════════════════════════════════════════════
+local playButton = Instance.new("TextButton")
+playButton.Name                   = "PlayButton"
+playButton.Size                   = UDim2.fromOffset(150, 40)
+playButton.AnchorPoint            = Vector2.new(0, 1)
+playButton.Position               = UDim2.new(0, LOGO_SIZE + 32, 1, 120)  -- starts below screen left-aligned with title
+playButton.BackgroundColor3       = T.Panel
+playButton.BackgroundTransparency = 1
+playButton.Text                   = "PLAY"
+playButton.Font                   = Enum.Font.GothamBold
+playButton.TextSize               = 18
+playButton.TextColor3             = T.AccentBright
+playButton.TextTransparency       = 1
+playButton.AutoButtonColor        = false
+playButton.ZIndex                 = 10
+playButton.Parent                 = screenGui
+corner(playButton, 5)
+
+local playStroke = stroke(playButton, T.Accent, 1.5)
+playStroke.Transparency = 1
+
+-- ═══════════════════════════════════════════════════════════
+--  VERSION + CREATOR  (bottom corners, always visible)
+-- ═══════════════════════════════════════════════════════════
+local versionLabel = Instance.new("TextLabel")
+versionLabel.Name                   = "VersionLabel"
+versionLabel.Size                   = UDim2.fromOffset(200, 32)
+versionLabel.AnchorPoint            = Vector2.new(1, 1)
+versionLabel.Position               = UDim2.new(1, -18, 1, -18)
+versionLabel.BackgroundTransparency = 1
+versionLabel.Text                   = "V 0.0.1"
+versionLabel.Font                   = Enum.Font.GothamBlack
+versionLabel.TextSize               = 20
+versionLabel.TextColor3             = T.Accent
+versionLabel.TextXAlignment         = Enum.TextXAlignment.Right
+versionLabel.TextTransparency       = 0
+versionLabel.ZIndex                 = 12
+versionLabel.Parent                 = screenGui
+
+local versionStroke = Instance.new("UIStroke")
+versionStroke.Color       = T.AccentDeep
+versionStroke.Thickness   = 2
+versionStroke.Transparency = 0
+versionStroke.Parent      = versionLabel
+
+local creatorLabel = Instance.new("TextLabel")
+creatorLabel.Name                   = "CreatorLabel"
+creatorLabel.Size                   = UDim2.fromOffset(200, 28)
+creatorLabel.AnchorPoint            = Vector2.new(1, 1)
+creatorLabel.Position               = UDim2.new(1, -18, 1, -46)
+creatorLabel.BackgroundTransparency = 1
+creatorLabel.Text                   = "ΣCH"
+creatorLabel.Font                   = Enum.Font.GothamBlack
+creatorLabel.TextSize               = 18
+creatorLabel.TextColor3             = T.TextMuted
+creatorLabel.TextXAlignment         = Enum.TextXAlignment.Right
+creatorLabel.TextTransparency       = 0
+creatorLabel.ZIndex                 = 12
+creatorLabel.Parent                 = screenGui
+
+local creatorStroke = Instance.new("UIStroke")
+creatorStroke.Color       = T.AccentDeep
+creatorStroke.Thickness   = 1.5
+creatorStroke.Transparency = 0
+creatorStroke.Parent      = creatorLabel
+
+-- ═══════════════════════════════════════════════════════════
+--  SMEAR SPAWNER — super visible
+-- ═══════════════════════════════════════════════════════════
+local function spawnSmear(cx, cy, rot, alpha)
+	local s = Instance.new("ImageLabel")
+	s.Image                  = IMAGE_ID
+	s.Size                   = UDim2.fromOffset(LOGO_SIZE * 3.2, LOGO_SIZE * 0.55)
+	s.AnchorPoint            = Vector2.new(0.5, 0.5)
+	s.Position               = UDim2.new(0, cx, 0, cy)
+	s.BackgroundTransparency = 1
+	s.ImageTransparency      = math.clamp(1 - alpha, 0, 1)
+	s.Rotation               = rot
+	s.ScaleType              = Enum.ScaleType.Fit
+	s.ZIndex                 = 9
+	s.Parent                 = screenGui
+
+	TweenService:Create(s, TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+		ImageTransparency = 1,
+		Size = UDim2.fromOffset(LOGO_SIZE * 4.5, LOGO_SIZE * 0.12),
+	}):Play()
+
+	task.delay(0.22, function()
+		if s and s.Parent then s:Destroy() end
+	end)
+end
+
+-- ═══════════════════════════════════════════════════════════
+--  PHASE 1 — Spinning star + flames  (fake load)
+-- ═══════════════════════════════════════════════════════════
+local spinAngle  = 0
+local haloAngle  = 0
+local glowAngle  = 0
+local flickTimer = 0
+local dotTimer   = 0
+local DOT_CYCLE  = 0.45   -- seconds per dot step
+
+local spinConn = RunService.Heartbeat:Connect(function(dt)
+	spinAngle = spinAngle + dt * 55
+	haloAngle = haloAngle - dt * 35
+	glowAngle = glowAngle + dt * 12
+	logoImage.Rotation  = spinAngle % 360
+	haloRing.Rotation   = haloAngle % 360
+	logoGlow.Rotation   = glowAngle % 360
+
+	-- Pulse the glow size slightly
+	local pulse = 1 + 0.06 * math.sin(tick() * 3.5)
+	local gs = LOGO_SIZE * 2 * pulse
+	logoGlow.Size = UDim2.fromOffset(gs, gs)
+end)
+
+local flickConn = RunService.Heartbeat:Connect(function(dt)
+	flickTimer = flickTimer + dt
+	local flicker = 0.06 * math.sin(flickTimer * 7.3)
+		+ 0.04 * math.sin(flickTimer * 13.1 + 1.2)
+	flameCanvas.GroupTransparency = math.clamp(flicker, 0, 0.12)
+
+	-- Animated loading dots
+	dotTimer = dotTimer + dt
+	if dotTimer >= DOT_CYCLE then
+		dotTimer = dotTimer - DOT_CYCLE
+		for i, dot in ipairs(loadDots) do
+			local active = (math.floor(tick() / DOT_CYCLE) % 3) + 1 == i
+			TweenService:Create(dot, TweenInfo.new(0.15),
+				{ BackgroundTransparency = active and 0 or 0.72,
+					Size = active and UDim2.fromOffset(13, 13) or UDim2.fromOffset(9, 9) }
+			):Play()
+		end
+	end
+end)
+
+local particleConn = RunService.Heartbeat:Connect(function(dt)
+	dirBlend = dirBlend + (dirBlendTarget - dirBlend) * math.min(dt * DIR_BLEND_SPEED, 1)
+	local t = tick()
+	for _, p in ipairs(particles) do
+		p.y = p.y - p.speed * (1 - dirBlend) * dt
+		p.x = p.x + p.speed * 0.85 * dirBlend * dt
+		if p.y < -0.06 then p.y = 1.05; p.baseX = rng:NextNumber(0,1); p.x = p.baseX end
+		if p.x >  1.06 then p.x = -0.05; p.baseY = rng:NextNumber(0,1); p.y = p.baseY end
+		local wobble = math.sin(t * p.freq + p.seed) * p.amp
+		local px = p.baseX + wobble * (1 - dirBlend) + p.x * dirBlend
+		local py = p.y * (1 - dirBlend) + p.baseY + wobble * dirBlend
+		p.gui.Position = UDim2.new(px, 0, py, 0)
+	end
+end)
+
+-- Fake load: 10–12 seconds random
+task.wait(math.random(10, 20) / 10)
+
+-- ═══════════════════════════════════════════════════════════
+--  PHASE 2 — Shoot left
+-- ═══════════════════════════════════════════════════════════
+flickConn:Disconnect()
+spinConn:Disconnect()
+
+-- Hide loading dots
+tw(loadingFrame, TweenInfo.new(0.2), { GroupTransparency = 1 })
+
+local function easeOutQuad(t) return 1 - (1 - t) * (1 - t) end
+
+local FLY_TIME       = 0.50
+local vp             = workspace.CurrentCamera.ViewportSize
+local startX, startY = vp.X * 0.5, vp.Y * 0.5
+local endX,   endY   = LOGO_SIZE / 2 + 16, vp.Y * 0.5
+local flyElapsed     = 0
+local smearTimer     = 0
+local SMEAR_RATE     = 0.022
+local haloFlyAngle   = haloAngle
+local glowFlyAngle   = glowAngle
+
+-- Red flash on shoot
+tw(flashFrame, TweenInfo.new(0.07), { BackgroundTransparency = 0.72 })
+task.delay(0.07, function()
+	tw(flashFrame, TweenInfo.new(0.28, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
+		{ BackgroundTransparency = 1 })
+end)
+safePlay(sWhoosh)
+
+-- Fade flames + vignette
+tw(flameCanvas, TweenInfo.new(FLY_TIME * 1.5, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
+	{ GroupTransparency = 1 })
+tw(vigCanvas,   TweenInfo.new(FLY_TIME * 1.2, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
+	{ GroupTransparency = 1 })
+tw(bgBase,      TweenInfo.new(FLY_TIME * 1.8, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
+	{ BackgroundColor3 = T.Panel })
+
+-- Particles pivot to rightward drift
+dirBlendTarget = 1
+
+-- Title fades in mid-fly
+local _titleFlyInfo = TweenInfo.new(FLY_TIME * 0.85, Enum.EasingStyle.Quint, Enum.EasingDirection.Out, 0, false, FLY_TIME * 0.3)
+setAllLettersTransparency(0,   _titleFlyInfo)
+setAllStrokesTransparency(0.2, _titleFlyInfo)
+
+local flyConn
+flyConn = RunService.Heartbeat:Connect(function(dt)
+	flyElapsed    = flyElapsed + dt
+	local t       = math.clamp(flyElapsed / FLY_TIME, 0, 1)
+	local et      = easeOutQuad(t)
+
+	local cx = startX + (endX - startX) * et
+	local cy = startY + (endY - startY) * et
+
+	logoImage.Position = UDim2.new(0, cx, 0, cy)
+	haloRing.Position  = UDim2.new(0, cx, 0, cy)
+	logoGlow.Position  = UDim2.new(0, cx, 0, cy)
+
+	spinAngle      = spinAngle      + dt * 160
+	haloFlyAngle   = haloFlyAngle   - dt * 110
+	glowFlyAngle   = glowFlyAngle   + dt * 18
+	logoImage.Rotation = (spinAngle    + (-90 * et)) % 360
+	haloRing.Rotation  = haloFlyAngle  % 360
+	logoGlow.Rotation  = glowFlyAngle  % 360
+
+	-- Smears
+	if t < 0.80 then
+		smearTimer = smearTimer + dt
+		if smearTimer >= SMEAR_RATE then
+			smearTimer = 0
+			spawnSmear(cx, cy, logoImage.Rotation, 0.92 - (t * 0.45))
+		end
+	end
+
+	if t >= 1 then
+		flyConn:Disconnect()
+		logoImage.Position = UDim2.new(0, endX, 0, endY)
+		haloRing.Position  = UDim2.new(0, endX, 0, endY)
+		logoGlow.Position  = UDim2.new(0, endX, 0, endY)
+
+		-- Impact flash
+		safePlay(sImpact)
+		tw(flashFrame, TweenInfo.new(0.06), { BackgroundTransparency = 0.80 })
+		task.delay(0.06, function()
+			tw(flashFrame, TweenInfo.new(0.25, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
+				{ BackgroundTransparency = 1 })
+		end)
+
+		-- Shockwave
+		shockwave.Position = UDim2.new(0, endX, 0, endY)
+		shockwave.Size     = UDim2.fromOffset(0, 0)
+		shockwave.ImageTransparency = 0.15
+		TweenService:Create(shockwave, TweenInfo.new(0.55, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {
+			Size = UDim2.fromOffset(520, 520), ImageTransparency = 1,
+		}):Play()
+
+		-- Halo tightens then pulses gently
+		tw(haloRing, TweenInfo.new(0.22, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+			Size = UDim2.fromOffset(LOGO_SIZE + 32, LOGO_SIZE + 32), ImageTransparency = 0.30,
+		})
+		task.delay(0.25, function()
+			TweenService:Create(haloRing,
+				TweenInfo.new(1.8, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true),
+				{ ImageTransparency = 0.65, Size = UDim2.fromOffset(LOGO_SIZE + 48, LOGO_SIZE + 48) }
+			):Play()
+		end)
+
+		-- Glow pulses behind the logo
+		TweenService:Create(logoGlow,
+			TweenInfo.new(1.4, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true),
+			{ ImageTransparency = 0.45, Size = UDim2.fromOffset(LOGO_SIZE * 2.4, LOGO_SIZE * 2.4) }
+		):Play()
+
+		-- Title: slide in from right + underline sweep + subtitle
+		task.delay(0.08, function()
+			safePlay(sSting)
+			local _ri = TweenInfo.new(0.45, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+			titleLabel.Position = UDim2.new(0, TITLE_LEFT + 45, 0.5, 0)
+			tw(titleLabel, _ri, { Position = UDim2.new(0, TITLE_LEFT, 0.5, 0) })
+			setAllLettersTransparency(0,    _ri)
+			setAllStrokesTransparency(0.15, _ri)
+
+			task.delay(0.18, function()
+				tw(titleUnderline,
+					TweenInfo.new(0.40, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
+					{ Size = UDim2.fromOffset(460, 3) })
+			end)
+			task.delay(0.35, function()
+				tw(subtitleLabel,
+					TweenInfo.new(0.35, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
+					{ TextTransparency = 0 })
+			end)
+			task.delay(0.55, function()
+				setAllStrokesColor(T.AccentBright,
+					TweenInfo.new(2.0, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true))
+			end)
+
+			task.delay(0.20, function()
+				for _, f in ipairs(bracketParts) do
+					tw(f, TweenInfo.new(0.35, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
+						{ BackgroundTransparency = 0.4 })
+				end
+			end)
+		end)
+
+		-- Idle spin after landing
+		local idleConn
+		idleConn = RunService.Heartbeat:Connect(function(dt2)
+			spinAngle    = spinAngle    + dt2 * 55
+			haloFlyAngle = haloFlyAngle - dt2 * 30
+			glowFlyAngle = glowFlyAngle + dt2 * 10
+			logoImage.Rotation = spinAngle    % 360
+			haloRing.Rotation  = haloFlyAngle % 360
+			logoGlow.Rotation  = glowFlyAngle % 360
+		end)
+
+		-- ── PHASE 3 — reveal PLAY ──────────────────────
+		task.delay(0.35, function()
+
+			twWait(bgBase,
+				TweenInfo.new(0.55, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
+				{ BackgroundTransparency = 0.50 })
+
+			-- Button slides up from below into left-aligned position
+			tw(playButton,
+				TweenInfo.new(0.60, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
+				{ Position = UDim2.new(0, LOGO_SIZE + 32, 1, -52), BackgroundTransparency = 0.55 })
+
+			task.delay(0.10, function()
+				tw(playButton,
+					TweenInfo.new(0.30, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
+					{ TextTransparency = 0 })
+				tw(playStroke,
+					TweenInfo.new(0.30, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
+					{ Transparency = 0 })
+			end)
+
+			task.wait(0.75)
+
+			-- Stroke slowly breathes between accent and bright
+			TweenService:Create(playStroke,
+				TweenInfo.new(1.4, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true),
+				{ Color = T.AccentBright }):Play()
+
+			-- Hover: slight fill + text brightens
+			playButton.MouseEnter:Connect(function()
+				safePlay(sHover)
+				tw(playButton, TweenInfo.new(0.12, Enum.EasingStyle.Quart, Enum.EasingDirection.Out),
+					{ Size = UDim2.fromOffset(162, 44), BackgroundTransparency = 0.30,
+						TextColor3 = T.Text })
+				tw(playStroke, TweenInfo.new(0.12),
+					{ Color = T.AccentBright, Thickness = 2 })
+			end)
+			playButton.MouseLeave:Connect(function()
+				tw(playButton, TweenInfo.new(0.18, Enum.EasingStyle.Quart, Enum.EasingDirection.Out),
+					{ Size = UDim2.fromOffset(150, 40), BackgroundTransparency = 0.55,
+						TextColor3 = T.AccentBright })
+				tw(playStroke, TweenInfo.new(0.18),
+					{ Color = T.Accent, Thickness = 1.5 })
+			end)
+
+			_G._introIdleConn = idleConn
+		end)
+	end
+end)
+
+-- ═══════════════════════════════════════════════════════════
+--  PLAY — dismiss
+-- ═══════════════════════════════════════════════════════════
+playButton.MouseButton1Click:Connect(function()
+	safePlay(sClick)
+	fadeOutAllSounds(0.8)
+
+	if _G._introIdleConn then
+		_G._introIdleConn:Disconnect()
+		_G._introIdleConn = nil
+	end
+	particleConn:Disconnect()
+
+	-- Button press squish
+	tw(playButton, TweenInfo.new(0.08, Enum.EasingStyle.Quad, Enum.EasingDirection.In),
+		{ Size = UDim2.fromOffset(138, 36) })
+
+	task.wait(0.08)
+
+	local d = TweenInfo.new(0.55, Enum.EasingStyle.Quint, Enum.EasingDirection.In)
+	tw(logoImage,      d, { ImageTransparency = 1 })
+	tw(haloRing,       d, { ImageTransparency = 1 })
+	tw(logoGlow,       d, { ImageTransparency = 1 })
+	setAllLettersTransparency(1, d)
+	tw(subtitleLabel,  d, { TextTransparency  = 1 })
+	tw(titleUnderline, d, { BackgroundTransparency = 1 })
+	tw(playButton,     d, { BackgroundTransparency = 1, TextTransparency = 1 })
+	tw(playStroke,     d, { Transparency = 1 })
+	tw(pHost,          d, { BackgroundTransparency = 1 })
+	for _, f in ipairs(bracketParts) do
+		tw(f, d, { BackgroundTransparency = 1 })
+	end
+	twWait(bgBase, d, { BackgroundTransparency = 1 })
+	screenGui:Destroy()
+end)
