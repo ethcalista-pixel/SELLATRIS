@@ -1,0 +1,877 @@
+-- LightsEditor.lua (LocalScript)
+
+local Players           = game:GetService("Players")
+local TweenService      = game:GetService("TweenService")
+local RunService        = game:GetService("RunService")
+local UserInputService  = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local player = Players.LocalPlayer
+
+local BarEvents   = ReplicatedStorage:WaitForChild("BarEvents")
+local toggleEvent = BarEvents:WaitForChild("ToggleLightsEditor")
+local lightsRepo  = ReplicatedStorage:WaitForChild("Lights")
+
+local T = {
+	Panel=Color3.fromRGB(19,11,11), PanelTop=Color3.fromRGB(27,16,16),
+	ItemBg=Color3.fromRGB(30,17,17), ItemHover=Color3.fromRGB(46,24,24),
+	ItemActive=Color3.fromRGB(90,18,18), Accent=Color3.fromRGB(255,58,58),
+	AccentBright=Color3.fromRGB(255,115,115), AccentDark=Color3.fromRGB(160,18,18),
+	AccentDeep=Color3.fromRGB(110,10,10), Text=Color3.fromRGB(255,255,255),
+	TextDim=Color3.fromRGB(185,150,150), TextMuted=Color3.fromRGB(108,70,70),
+	Stroke=Color3.fromRGB(58,30,30), StrokeHot=Color3.fromRGB(115,45,45),
+	Green=Color3.fromRGB(75,215,105), Orange=Color3.fromRGB(255,160,40),
+}
+
+local PANEL_W  = 282
+local PANEL_H  = 524
+local RIGHT_W  = 262
+local EXPAND_W = PANEL_W + RIGHT_W
+
+local TS      = TweenInfo.new(0.38, Enum.EasingStyle.Quart, Enum.EasingDirection.Out)
+local TS_FAST = TweenInfo.new(0.15, Enum.EasingStyle.Quart, Enum.EasingDirection.Out)
+
+local function mk(cls, parent, props)
+	local i = Instance.new(cls)
+	if parent then i.Parent = parent end
+	if props then for k,v in pairs(props) do i[k]=v end end
+	return i
+end
+local function corner(p, r) return mk("UICorner", p, {CornerRadius=UDim.new(0,r or 8)}) end
+local function stroke(p, c, t) return mk("UIStroke", p, {Color=c or T.Stroke, Thickness=t or 1, ApplyStrokeMode=Enum.ApplyStrokeMode.Border}) end
+local function grad(p, c0, c1, r) return mk("UIGradient", p, {Color=ColorSequence.new{ColorSequenceKeypoint.new(0,c0), ColorSequenceKeypoint.new(1,c1)}, Rotation=r or 90}) end
+
+local lightContainer = mk("Folder", workspace, {Name="_ClientLights_"..player.UserId})
+
+local lightList  = {}
+local selectedId = nil
+local clipboard  = nil
+local handleMode = "Move"
+local moveH      = nil
+local arcH       = nil
+local selBox     = nil
+local isExpanded = false
+local isTrans    = false
+local panelOpen  = false
+local idCtr      = 0
+local dragging   = nil
+local lightCounts = {}
+local rowOrder   = 0
+
+local function nextId() idCtr += 1; return idCtr end
+local function findLight(id)
+	for _,l in ipairs(lightList) do if l.id == id then return l end end
+end
+
+local buildProperties, setExpanded, spawnHandles, destroyHandles, selectLight
+
+-- ── GUI ─────────────────────────────────────────────────────────────────────
+local gui = mk("ScreenGui", player:WaitForChild("PlayerGui"), {
+	Name="LightsEditorGUI", ResetOnSpawn=false,
+	IgnoreGuiInset=true, ZIndexBehavior=Enum.ZIndexBehavior.Sibling, DisplayOrder=10,
+})
+
+local POS_CLOSED = UDim2.new(0, -(PANEL_W+20), 0.5, -PANEL_H/2)
+local POS_OPEN   = UDim2.new(0, 8,             0.5, -PANEL_H/2)
+
+local mainPanel = mk("Frame", gui, {
+	Size=UDim2.new(0,PANEL_W,0,PANEL_H), Position=POS_CLOSED,
+	BackgroundColor3=T.Panel, ClipsDescendants=true, ZIndex=30,
+})
+corner(mainPanel,14); stroke(mainPanel,T.Stroke,1.5)
+mk("UIGradient",mainPanel,{
+	Color=ColorSequence.new{
+		ColorSequenceKeypoint.new(0,Color3.fromRGB(29,16,16)),
+		ColorSequenceKeypoint.new(0.55,Color3.fromRGB(18,10,10)),
+		ColorSequenceKeypoint.new(1,Color3.fromRGB(11,6,6)),
+	}, Rotation=130,
+})
+
+local particles, rng = {}, Random.new()
+local pHost = mk("Frame",mainPanel,{Size=UDim2.new(1,0,1,0),BackgroundTransparency=1,ZIndex=1})
+for i = 1,8 do
+	local sz = rng:NextNumber(3,12)
+	local p  = mk("Frame",pHost,{
+		Size=UDim2.new(0,sz,0,sz), BackgroundColor3=(i%4==0) and T.AccentBright or T.Accent,
+		BackgroundTransparency=rng:NextNumber(0.91,0.97), BorderSizePixel=0, ZIndex=1,
+	})
+	corner(p,50)
+	table.insert(particles, {gui=p, baseX=rng:NextNumber(0,1), y=rng:NextNumber(0,1),
+		speed=rng:NextNumber(0.012,0.048), amp=rng:NextNumber(0.01,0.035),
+		freq=rng:NextNumber(0.4,2.0), seed=rng:NextNumber(0,math.pi*2)})
+end
+
+-- ── LEFT ─────────────────────────────────────────────────────────────────────
+local leftCont = mk("Frame",mainPanel,{Size=UDim2.new(0,PANEL_W,1,0),BackgroundTransparency=1,ZIndex=5})
+
+local titleBar = mk("Frame",leftCont,{Size=UDim2.new(1,0,0,46),BackgroundColor3=T.PanelTop,ZIndex=6})
+corner(titleBar,14)
+mk("Frame",titleBar,{Size=UDim2.new(1,0,0,16),Position=UDim2.new(0,0,1,-16),BackgroundColor3=T.PanelTop,ZIndex=6})
+local al=mk("Frame",titleBar,{Size=UDim2.new(1,0,0,2),Position=UDim2.new(0,0,1,-1),BackgroundColor3=Color3.new(1,1,1),ZIndex=7})
+grad(al,T.AccentDeep,T.Accent,0)
+local td=mk("Frame",titleBar,{Size=UDim2.new(0,7,0,7),Position=UDim2.new(0,14,0.5,-3),BackgroundColor3=T.Accent,ZIndex=7})
+corner(td,4); stroke(td,T.AccentBright,1)
+mk("TextLabel",titleBar,{
+	Size=UDim2.new(1,-32,1,0), Position=UDim2.new(0,28,0,0),
+	BackgroundTransparency=1, Text="SCENE LIGHTS",
+	TextColor3=T.Text, TextSize=11, Font=Enum.Font.GothamBlack,
+	TextXAlignment=Enum.TextXAlignment.Left, ZIndex=7,
+})
+
+mk("TextLabel",leftCont,{
+	Size=UDim2.new(1,-16,0,16), Position=UDim2.new(0,8,0,52),
+	BackgroundTransparency=1, Text="ADD LIGHT",
+	TextColor3=T.TextMuted, TextSize=9, Font=Enum.Font.GothamBlack,
+	TextXAlignment=Enum.TextXAlignment.Left, ZIndex=6,
+})
+
+local tmplScroll = mk("ScrollingFrame",leftCont,{
+	Size=UDim2.new(1,-16,0,54), Position=UDim2.new(0,8,0,70),
+	BackgroundTransparency=1, BorderSizePixel=0,
+	ScrollBarThickness=2, ScrollBarImageColor3=T.Accent,
+	CanvasSize=UDim2.new(0,0,0,0), AutomaticCanvasSize=Enum.AutomaticSize.X,
+	ScrollingDirection=Enum.ScrollingDirection.X, ZIndex=6,
+})
+mk("UIPadding",tmplScroll,{PaddingLeft=UDim.new(0,2),PaddingRight=UDim.new(0,4)})
+mk("UIListLayout",tmplScroll,{
+	FillDirection=Enum.FillDirection.Horizontal, Padding=UDim.new(0,6),
+	VerticalAlignment=Enum.VerticalAlignment.Center, SortOrder=Enum.SortOrder.LayoutOrder,
+})
+
+local sepLine = mk("Frame",leftCont,{Size=UDim2.new(1,-16,0,1),Position=UDim2.new(0,8,0,130),BackgroundColor3=T.Stroke,ZIndex=5})
+mk("Frame",sepLine,{Size=UDim2.new(0.38,0,1,0),BackgroundColor3=T.AccentDeep,ZIndex=6})
+
+mk("TextLabel",leftCont,{
+	Size=UDim2.new(1,-16,0,16), Position=UDim2.new(0,8,0,136),
+	BackgroundTransparency=1, Text="EXPLORER",
+	TextColor3=T.TextMuted, TextSize=9, Font=Enum.Font.GothamBlack,
+	TextXAlignment=Enum.TextXAlignment.Left, ZIndex=6,
+})
+
+local EXPL_H = PANEL_H - 156 - 52
+
+local explorerScroll = mk("ScrollingFrame",leftCont,{
+	Size=UDim2.new(1,-16,0,EXPL_H), Position=UDim2.new(0,8,0,156),
+	BackgroundColor3=Color3.fromRGB(11,6,6), BorderSizePixel=0,
+	ScrollBarThickness=3, ScrollBarImageColor3=T.Accent,
+	VerticalScrollBarInset=Enum.ScrollBarInset.ScrollBar,
+	CanvasSize=UDim2.new(0,0,0,0), AutomaticCanvasSize=Enum.AutomaticSize.Y,
+	ZIndex=6,
+})
+corner(explorerScroll,8); stroke(explorerScroll,T.Stroke,1)
+mk("UIPadding",explorerScroll,{PaddingTop=UDim.new(0,4),PaddingBottom=UDim.new(0,4),PaddingLeft=UDim.new(0,4),PaddingRight=UDim.new(0,4)})
+mk("UIListLayout",explorerScroll,{Padding=UDim.new(0,3),HorizontalAlignment=Enum.HorizontalAlignment.Center,SortOrder=Enum.SortOrder.LayoutOrder})
+
+local emptyLbl = mk("TextLabel",explorerScroll,{
+	Size=UDim2.new(1,0,0,44), BackgroundTransparency=1,
+	Text="no lights in scene", TextColor3=T.TextMuted,
+	TextSize=9, Font=Enum.Font.Gotham, ZIndex=7,
+})
+
+local bottomBar = mk("Frame",leftCont,{
+	Size=UDim2.new(1,-16,0,40), Position=UDim2.new(0,8,1,-48),
+	BackgroundTransparency=1, ZIndex=6,
+})
+mk("UIListLayout",bottomBar,{FillDirection=Enum.FillDirection.Horizontal,Padding=UDim.new(0,6),VerticalAlignment=Enum.VerticalAlignment.Center,SortOrder=Enum.SortOrder.LayoutOrder})
+
+local function makeBottomBtn(label, col, order, onClick)
+	local btn=mk("TextButton",bottomBar,{
+		Size=UDim2.new(0.5,-3,0,36), BackgroundColor3=T.ItemBg,
+		Text=label, TextColor3=T.TextDim, TextSize=9, Font=Enum.Font.GothamBlack,
+		ZIndex=7, LayoutOrder=order,
+	})
+	corner(btn,8); stroke(btn,T.Stroke,1)
+	btn.MouseEnter:Connect(function() TweenService:Create(btn,TS_FAST,{BackgroundColor3=T.ItemHover,TextColor3=col}):Play() end)
+	btn.MouseLeave:Connect(function() TweenService:Create(btn,TS_FAST,{BackgroundColor3=T.ItemBg,TextColor3=T.TextDim}):Play() end)
+	btn.MouseButton1Click:Connect(onClick)
+	return btn
+end
+
+local copyBtn  = makeBottomBtn("COPY SETTINGS",  T.Accent,  1, function()
+	local l = findLight(selectedId); if not l then return end
+	local li = l.light
+	clipboard = {
+		Brightness=li.Brightness, Range=li.Range,
+		Color=li.Color, Shadows=li.Shadows, type=l.type,
+	}
+	if li:IsA("SpotLight") or li:IsA("SurfaceLight") then
+		clipboard.Angle = li.Angle; clipboard.Face = li.Face
+	end
+	TweenService:Create(copyBtn,TS_FAST,{TextColor3=T.Green}):Play()
+	task.delay(1.2,function() TweenService:Create(copyBtn,TS_FAST,{TextColor3=T.TextDim}):Play() end)
+end)
+
+local pasteBtn = makeBottomBtn("PASTE SETTINGS", T.Orange, 2, function()
+	if not clipboard or not selectedId then return end
+	local l = findLight(selectedId); if not l then return end
+	local li = l.light
+	li.Brightness = clipboard.Brightness
+	li.Range      = clipboard.Range
+	li.Color      = clipboard.Color
+	li.Shadows    = clipboard.Shadows
+	if clipboard.Angle and (li:IsA("SpotLight") or li:IsA("SurfaceLight")) then
+		li.Angle = clipboard.Angle
+		li.Face  = clipboard.Face
+	end
+	if l.rowDot then l.rowDot.BackgroundColor3 = clipboard.Color end
+	buildProperties(l)
+	TweenService:Create(pasteBtn,TS_FAST,{TextColor3=T.Green}):Play()
+	task.delay(1.2,function() TweenService:Create(pasteBtn,TS_FAST,{TextColor3=T.TextDim}):Play() end)
+end)
+
+-- ── RIGHT ─────────────────────────────────────────────────────────────────────
+local rightCanvas = mk("CanvasGroup",mainPanel,{
+	Size=UDim2.new(0,RIGHT_W,1,0), Position=UDim2.new(0,PANEL_W,0,0),
+	BackgroundTransparency=1, GroupTransparency=1, ZIndex=5,
+})
+
+local rightBg = mk("Frame",rightCanvas,{Size=UDim2.new(1,0,1,0),BackgroundColor3=Color3.fromRGB(17,10,10),ZIndex=4})
+corner(rightBg,14); stroke(rightBg,T.Stroke,1.5)
+mk("UIGradient",rightBg,{Color=ColorSequence.new{ColorSequenceKeypoint.new(0,Color3.fromRGB(25,14,14)),ColorSequenceKeypoint.new(1,Color3.fromRGB(12,7,7))},Rotation=130})
+
+local rightTitleBar = mk("Frame",rightCanvas,{Size=UDim2.new(1,0,0,46),BackgroundColor3=T.PanelTop,ZIndex=6})
+corner(rightTitleBar,14)
+mk("Frame",rightTitleBar,{Size=UDim2.new(1,0,0,16),Position=UDim2.new(0,0,1,-16),BackgroundColor3=T.PanelTop,ZIndex=6})
+local ral=mk("Frame",rightTitleBar,{Size=UDim2.new(1,0,0,2),Position=UDim2.new(0,0,1,-1),BackgroundColor3=Color3.new(1,1,1),ZIndex=7})
+grad(ral,T.AccentDeep,T.Accent,0)
+
+local rightNameLbl = mk("TextLabel",rightTitleBar,{
+	Size=UDim2.new(1,-68,1,0), Position=UDim2.new(0,12,0,0),
+	BackgroundTransparency=1, Text="PROPERTIES",
+	TextColor3=T.TextDim, TextSize=11, Font=Enum.Font.GothamBlack,
+	TextXAlignment=Enum.TextXAlignment.Left, ZIndex=7,
+})
+
+local closeBtn = mk("TextButton",rightTitleBar,{
+	Size=UDim2.new(0,46,0,26), Position=UDim2.new(1,-54,0.5,-13),
+	BackgroundColor3=T.Stroke, Text="CLOSE",
+	TextColor3=T.TextDim, TextSize=11, Font=Enum.Font.GothamBold, ZIndex=8,
+})
+corner(closeBtn,6); stroke(closeBtn,T.Stroke)
+closeBtn.MouseEnter:Connect(function() TweenService:Create(closeBtn,TS_FAST,{BackgroundColor3=T.AccentDark,TextColor3=T.Text}):Play() end)
+closeBtn.MouseLeave:Connect(function() TweenService:Create(closeBtn,TS_FAST,{BackgroundColor3=T.Stroke,TextColor3=T.TextDim}):Play() end)
+closeBtn.MouseButton1Click:Connect(function() setExpanded(false) end)
+
+-- Handle mode pill
+local hmPill = mk("Frame",rightCanvas,{
+	Size=UDim2.new(1,-16,0,28), Position=UDim2.new(0,8,0,52),
+	BackgroundColor3=Color3.fromRGB(10,5,5), ZIndex=6,
+})
+corner(hmPill,10); stroke(hmPill,T.Stroke,1)
+local hmSlide = mk("Frame",hmPill,{
+	Size=UDim2.new(0.5,-2,1,-4), Position=UDim2.new(0,2,0,2),
+	BackgroundColor3=T.AccentDark, ZIndex=7,
+})
+corner(hmSlide,8); grad(hmSlide,T.Accent,T.AccentDark,90)
+local hmMovLbl = mk("TextLabel",hmPill,{
+	Size=UDim2.new(0.5,0,1,0), BackgroundTransparency=1, Text="MOVE",
+	TextColor3=T.Text, TextSize=9, Font=Enum.Font.GothamBlack, ZIndex=8,
+})
+local hmRotLbl = mk("TextLabel",hmPill,{
+	Size=UDim2.new(0.5,0,1,0), Position=UDim2.new(0.5,0,0,0),
+	BackgroundTransparency=1, Text="ROTATE",
+	TextColor3=T.TextMuted, TextSize=9, Font=Enum.Font.GothamBlack, ZIndex=8,
+})
+local hmBtn = mk("TextButton",hmPill,{Size=UDim2.new(1,0,1,0),BackgroundTransparency=1,Text="",ZIndex=9})
+hmBtn.MouseButton1Click:Connect(function()
+	handleMode = handleMode == "Move" and "Rotate" or "Move"
+	local isM = handleMode == "Move"
+	TweenService:Create(hmSlide,TS_FAST,{Position=isM and UDim2.new(0,2,0,2) or UDim2.new(0.5,-2,0,2)}):Play()
+	TweenService:Create(hmMovLbl,TS_FAST,{TextColor3=isM and T.Text or T.TextMuted}):Play()
+	TweenService:Create(hmRotLbl,TS_FAST,{TextColor3=isM and T.TextMuted or T.Text}):Play()
+	local l = findLight(selectedId)
+	if l then spawnHandles(l) end
+end)
+
+local propScroll = mk("ScrollingFrame",rightCanvas,{
+	Size=UDim2.new(1,-8,1,-96), Position=UDim2.new(0,4,0,86),
+	BackgroundTransparency=1, BorderSizePixel=0,
+	ScrollBarThickness=3, ScrollBarImageColor3=T.Accent,
+	VerticalScrollBarInset=Enum.ScrollBarInset.ScrollBar,
+	CanvasSize=UDim2.new(0,0,0,0), AutomaticCanvasSize=Enum.AutomaticSize.Y,
+	ZIndex=5,
+})
+mk("UIPadding",propScroll,{PaddingTop=UDim.new(0,6),PaddingBottom=UDim.new(0,32),PaddingLeft=UDim.new(0,6),PaddingRight=UDim.new(0,6)})
+mk("UIListLayout",propScroll,{Padding=UDim.new(0,5),HorizontalAlignment=Enum.HorizontalAlignment.Center,SortOrder=Enum.SortOrder.LayoutOrder})
+
+-- ── FUNCTION DEFINITIONS ─────────────────────────────────────────────────────
+
+destroyHandles = function()
+	if moveH  then moveH:Destroy();  moveH  = nil end
+	if arcH   then arcH:Destroy();   arcH   = nil end
+	if selBox then selBox:Destroy(); selBox = nil end
+end
+
+spawnHandles = function(lightObj)
+	destroyHandles()
+	if not lightObj then return end
+	local part = lightObj.part
+
+	selBox = mk("SelectionBox",gui,{
+		Adornee=part, Color3=T.Accent,
+		LineThickness=0.04, SurfaceTransparency=0.85, SurfaceColor3=T.Accent,
+	})
+
+	if handleMode == "Move" then
+		local mh = mk("Handles",gui,{
+			Adornee=part,
+			Faces=Faces.new(Enum.NormalId.Front,Enum.NormalId.Back,Enum.NormalId.Left,Enum.NormalId.Right,Enum.NormalId.Top,Enum.NormalId.Bottom),
+			Style=Enum.HandlesStyle.Movement,
+		})
+		moveH = mh
+		local startCF, faceNorm = nil, nil
+		mh.MouseButton1Down:Connect(function(face)
+			startCF = part.CFrame
+			local cf = part.CFrame
+			local map = {
+				[Enum.NormalId.Right]= cf.RightVector,[Enum.NormalId.Left]=-cf.RightVector,
+				[Enum.NormalId.Top]= cf.UpVector,[Enum.NormalId.Bottom]=-cf.UpVector,
+				[Enum.NormalId.Front]= cf.LookVector,[Enum.NormalId.Back]=-cf.LookVector,
+			}
+			faceNorm = map[face] or Vector3.new(0,1,0)
+		end)
+		mh.MouseDrag:Connect(function(_,dist)
+			if not startCF then return end
+			part.CFrame = CFrame.new(startCF.Position + faceNorm * dist)
+				* CFrame.fromMatrix(Vector3.zero, startCF.XVector, startCF.YVector)
+		end)
+		mh.MouseButton1Up:Connect(function() startCF=nil; faceNorm=nil end)
+	else
+		local ah = mk("ArcHandles",gui,{
+			Adornee=part,
+			Axes=Axes.new(Enum.Axis.X,Enum.Axis.Y,Enum.Axis.Z),
+		})
+		arcH = ah
+		local startCF = nil
+		ah.MouseButton1Down:Connect(function() startCF = part.CFrame end)
+		ah.MouseDrag:Connect(function(axis, angle)
+			if not startCF then return end
+			local wa
+			if      axis==Enum.Axis.X then wa =  startCF.RightVector
+			elseif  axis==Enum.Axis.Y then wa =  startCF.UpVector
+			else                           wa = -startCF.LookVector
+			end
+			local pos = startCF.Position
+			local piv = CFrame.new(pos)
+			part.CFrame = (piv * CFrame.fromAxisAngle(wa, angle) * piv:Inverse()) * startCF
+		end)
+		ah.MouseButton1Up:Connect(function() startCF=nil end)
+	end
+end
+
+local function makePropSld(label, minV, maxV, defV, fmt, order, onChange)
+	local row=mk("Frame",propScroll,{Size=UDim2.new(1,0,0,52),BackgroundTransparency=1,ZIndex=6,LayoutOrder=order})
+	local hdr=mk("Frame",row,{Size=UDim2.new(1,0,0,16),BackgroundTransparency=1,ZIndex=6})
+	mk("TextLabel",hdr,{
+		Size=UDim2.new(1,-44,1,0),BackgroundTransparency=1,Text=label,
+		TextColor3=T.TextMuted,TextSize=8,Font=Enum.Font.GothamBold,
+		TextXAlignment=Enum.TextXAlignment.Left,ZIndex=7,
+	})
+	local vLbl=mk("TextLabel",hdr,{
+		Size=UDim2.new(0,42,1,0),Position=UDim2.new(1,-42,0,0),
+		BackgroundTransparency=1,Text=string.format(fmt,defV),
+		TextColor3=T.AccentBright,TextSize=9,Font=Enum.Font.GothamBlack,
+		TextXAlignment=Enum.TextXAlignment.Right,ZIndex=7,
+	})
+	local shell=mk("Frame",row,{
+		Size=UDim2.new(1,0,0,28),Position=UDim2.new(0,0,0,20),
+		BackgroundColor3=Color3.fromRGB(7,3,3),ZIndex=6,
+	})
+	corner(shell,6)
+	mk("UIStroke",shell,{Color=Color3.fromRGB(40,18,18),Thickness=1,ApplyStrokeMode=Enum.ApplyStrokeMode.Border})
+	local rail=mk("Frame",shell,{Size=UDim2.new(1,-16,0,2),Position=UDim2.new(0,8,0.5,-1),BackgroundColor3=Color3.fromRGB(45,18,18),ZIndex=7})
+	corner(rail,1)
+	local defA=math.clamp((defV-minV)/(maxV-minV),0,1)
+	local rf=mk("Frame",rail,{Size=UDim2.new(defA,0,1,0),BackgroundColor3=T.Accent,ZIndex=8})
+	corner(rf,1)
+	mk("UIGradient",rf,{Color=ColorSequence.new{ColorSequenceKeypoint.new(0,T.AccentDeep),ColorSequenceKeypoint.new(0.5,T.AccentDark),ColorSequenceKeypoint.new(1,T.AccentBright)},Rotation=0})
+	local ng=mk("Frame",shell,{Size=UDim2.new(0,10,1,-4),Position=UDim2.new(defA,-5,0,2),BackgroundColor3=T.Accent,BackgroundTransparency=0.72,ZIndex=8})
+	corner(ng,4)
+	local notch=mk("Frame",shell,{Size=UDim2.new(0,4,1,-10),Position=UDim2.new(defA,-2,0,5),BackgroundColor3=Color3.new(1,1,1),ZIndex=9})
+	corner(notch,2)
+	mk("UIGradient",notch,{Color=ColorSequence.new{ColorSequenceKeypoint.new(0,T.AccentBright),ColorSequenceKeypoint.new(1,T.Accent)},Rotation=90})
+	local hitbox=mk("TextButton",shell,{Size=UDim2.new(1,0,1,0),BackgroundTransparency=1,Text="",ZIndex=10})
+	local function setA(a)
+		a=math.clamp(a,0,1)
+		rf.Size=UDim2.new(a,0,1,0)
+		ng.Position=UDim2.new(a,-5,0,2)
+		notch.Position=UDim2.new(a,-2,0,5)
+		vLbl.Text=string.format(fmt,minV+(maxV-minV)*a)
+		onChange(minV+(maxV-minV)*a)
+	end
+	hitbox.InputBegan:Connect(function(inp)
+		if inp.UserInputType==Enum.UserInputType.MouseButton1 then
+			local a=math.clamp((inp.Position.X-shell.AbsolutePosition.X)/shell.AbsoluteSize.X,0,1)
+			setA(a); dragging={track=shell,set=setA}
+			TweenService:Create(ng,TS_FAST,{BackgroundTransparency=0.45}):Play()
+		end
+	end)
+	hitbox.InputEnded:Connect(function(inp)
+		if inp.UserInputType==Enum.UserInputType.MouseButton1 then TweenService:Create(ng,TS_FAST,{BackgroundTransparency=0.72}):Play() end
+	end)
+	hitbox.MouseEnter:Connect(function()
+		TweenService:Create(ng,TS_FAST,{BackgroundTransparency=0.55}):Play()
+		TweenService:Create(vLbl,TS_FAST,{TextColor3=T.Text}):Play()
+	end)
+	hitbox.MouseLeave:Connect(function()
+		TweenService:Create(ng,TS_FAST,{BackgroundTransparency=0.72}):Play()
+		TweenService:Create(vLbl,TS_FAST,{TextColor3=T.AccentBright}):Play()
+	end)
+	return setA
+end
+
+local function makePropTog(label, defV, order, onChange)
+	local row=mk("Frame",propScroll,{Size=UDim2.new(1,0,0,36),BackgroundColor3=T.ItemBg,ZIndex=6,LayoutOrder=order})
+	corner(row,8); stroke(row,T.Stroke,1)
+	mk("TextLabel",row,{
+		Size=UDim2.new(1,-58,1,0),Position=UDim2.new(0,10,0,0),
+		BackgroundTransparency=1,Text=label,
+		TextColor3=T.TextDim,TextSize=9,Font=Enum.Font.GothamBold,
+		TextXAlignment=Enum.TextXAlignment.Left,ZIndex=7,
+	})
+	local pill=mk("Frame",row,{Size=UDim2.new(0,44,0,22),Position=UDim2.new(1,-50,0.5,-11),BackgroundColor3=Color3.fromRGB(10,5,5),ZIndex=7})
+	corner(pill,11); stroke(pill,T.Stroke,1)
+	local knob=mk("Frame",pill,{Size=UDim2.new(0,18,0,18),Position=UDim2.new(0,2,0.5,-9),BackgroundColor3=T.TextMuted,ZIndex=8})
+	corner(knob,9)
+	local btn=mk("TextButton",row,{Size=UDim2.new(1,0,1,0),BackgroundTransparency=1,Text="",ZIndex=9})
+	local state = defV
+	local function setOn(v)
+		state=v
+		TweenService:Create(knob,TS_FAST,{Position=v and UDim2.new(1,-20,0.5,-9) or UDim2.new(0,2,0.5,-9),BackgroundColor3=v and T.Accent or T.TextMuted}):Play()
+		TweenService:Create(pill,TS_FAST,{BackgroundColor3=v and T.AccentDeep or Color3.fromRGB(10,5,5)}):Play()
+		onChange(v)
+	end
+	if defV then task.defer(function() setOn(true) end) end
+	btn.MouseButton1Click:Connect(function() setOn(not state) end)
+end
+
+local function makePropSec(label, order)
+	local f=mk("Frame",propScroll,{Size=UDim2.new(1,0,0,22),BackgroundTransparency=1,ZIndex=6,LayoutOrder=order})
+	mk("TextLabel",f,{
+		Size=UDim2.new(1,0,1,0),BackgroundTransparency=1,Text=label,
+		TextColor3=T.TextMuted,TextSize=9,Font=Enum.Font.GothamBlack,
+		TextXAlignment=Enum.TextXAlignment.Left,ZIndex=7,
+	})
+	local s=mk("Frame",f,{Size=UDim2.new(1,0,0,1),Position=UDim2.new(0,0,1,-1),BackgroundColor3=T.Stroke,ZIndex=7})
+	mk("Frame",s,{Size=UDim2.new(0.4,0,1,0),BackgroundColor3=T.AccentDeep,ZIndex=8})
+end
+
+buildProperties = function(lightObj)
+	for _,c in pairs(propScroll:GetChildren()) do
+		if c:IsA("GuiObject") then c:Destroy() end
+	end
+	if not lightObj then return end
+
+	local light = lightObj.light
+	local ltype = lightObj.type
+	rightNameLbl.Text = lightObj.name:upper()
+
+	-- Type badge
+	local badge=mk("Frame",propScroll,{Size=UDim2.new(1,0,0,28),BackgroundColor3=T.ItemBg,ZIndex=6,LayoutOrder=1})
+	corner(badge,7); stroke(badge,T.Stroke,1)
+	local bdot=mk("Frame",badge,{Size=UDim2.new(0,6,0,6),Position=UDim2.new(0,10,0.5,-3),BackgroundColor3=T.Accent,ZIndex=7})
+	corner(bdot,3)
+	mk("TextLabel",badge,{
+		Size=UDim2.new(1,-22,1,0),Position=UDim2.new(0,22,0,0),
+		BackgroundTransparency=1,Text=ltype:upper(),
+		TextColor3=T.TextDim,TextSize=9,Font=Enum.Font.GothamBlack,
+		TextXAlignment=Enum.TextXAlignment.Left,ZIndex=7,
+	})
+
+	makePropSec("PROPERTIES", 10)
+	makePropSld("BRIGHTNESS", 0, 10, light.Brightness, "%.2f", 11, function(v) light.Brightness=v end)
+	makePropSld("RANGE",      0, 100, light.Range,      "%.0f", 12, function(v) light.Range=v end)
+
+	makePropSec("COLOR", 20)
+	local function updateCol(r,g,b)
+		local c=Color3.new(math.clamp(r,0,1),math.clamp(g,0,1),math.clamp(b,0,1))
+		light.Color=c
+		if lightObj.rowDot then lightObj.rowDot.BackgroundColor3=c end
+	end
+	makePropSld("RED",   0,1, light.Color.R, "%.2f", 21, function(v) updateCol(v, light.Color.G, light.Color.B) end)
+	makePropSld("GREEN", 0,1, light.Color.G, "%.2f", 22, function(v) updateCol(light.Color.R, v, light.Color.B) end)
+	makePropSld("BLUE",  0,1, light.Color.B, "%.2f", 23, function(v) updateCol(light.Color.R, light.Color.G, v) end)
+
+	makePropSec("OPTIONS", 30)
+	makePropTog("CAST SHADOWS", light.Shadows, 31, function(v) light.Shadows=v end)
+
+	if ltype == "SpotLight" or ltype == "SurfaceLight" then
+		makePropSec("DIRECTIONAL", 40)
+		makePropSld("ANGLE", 0, 180, light.Angle, "%.0f°", 41, function(v) light.Angle=v end)
+
+		local faceNames = {"Top","Bottom","Front","Back","Left","Right"}
+		local faceContainer=mk("Frame",propScroll,{Size=UDim2.new(1,0,0,62),BackgroundTransparency=1,ZIndex=6,LayoutOrder=42})
+		mk("TextLabel",faceContainer,{
+			Size=UDim2.new(1,0,0,16),BackgroundTransparency=1,Text="FACE",
+			TextColor3=T.TextMuted,TextSize=8,Font=Enum.Font.GothamBold,
+			TextXAlignment=Enum.TextXAlignment.Left,ZIndex=7,
+		})
+		local faceGrid=mk("Frame",faceContainer,{Size=UDim2.new(1,0,0,42),Position=UDim2.new(0,0,0,18),BackgroundTransparency=1,ZIndex=6})
+		mk("UIGridLayout",faceGrid,{
+			CellSize=UDim2.new(1/3,-4,0,18), CellPadding=UDim2.new(0,5,0,5),
+			SortOrder=Enum.SortOrder.LayoutOrder,
+		})
+		for i,fn in ipairs(faceNames) do
+			local isActive = light.Face == Enum.NormalId[fn]
+			local fb=mk("TextButton",faceGrid,{
+				BackgroundColor3=isActive and T.ItemActive or T.ItemBg,
+				Text=fn:upper(),TextColor3=isActive and T.Text or T.TextMuted,
+				TextSize=7,Font=Enum.Font.GothamBold,ZIndex=7,LayoutOrder=i,
+			})
+			corner(fb,5); local fs=stroke(fb,isActive and T.Accent or T.Stroke,1)
+			fb.MouseButton1Click:Connect(function()
+				light.Face=Enum.NormalId[fn]
+				for _,c in pairs(faceGrid:GetChildren()) do
+					if c:IsA("TextButton") then
+						local a=c.Text==fn:upper()
+						TweenService:Create(c,TS_FAST,{BackgroundColor3=a and T.ItemActive or T.ItemBg,TextColor3=a and T.Text or T.TextMuted}):Play()
+						local cs=c:FindFirstChildWhichIsA("UIStroke")
+						if cs then TweenService:Create(cs,TS_FAST,{Color=a and T.Accent or T.Stroke}):Play() end
+					end
+				end
+			end)
+		end
+	end
+end
+
+setExpanded = function(state, id)
+	if state then
+		local l = findLight(id or selectedId)
+		if l then buildProperties(l) end
+		if isExpanded then return end
+		if isTrans then return end
+		isTrans=true; isExpanded=true
+		TweenService:Create(mainPanel,TS,{Size=UDim2.new(0,EXPAND_W,0,PANEL_H)}):Play()
+		task.delay(0.08,function() TweenService:Create(rightCanvas,TS,{GroupTransparency=0}):Play() end)
+		task.delay(0.38,function() isTrans=false end)
+	else
+		if not isExpanded or isTrans then return end
+		isTrans=true; isExpanded=false
+		TweenService:Create(rightCanvas,TS_FAST,{GroupTransparency=1}):Play()
+		TweenService:Create(mainPanel,TS,{Size=UDim2.new(0,PANEL_W,0,PANEL_H)}):Play()
+		task.delay(0.35,function() isTrans=false end)
+	end
+end
+
+selectLight = function(id)
+	if selectedId then
+		local old = findLight(selectedId)
+		if old and old.rowFrame then
+			local os=old.rowFrame:FindFirstChildWhichIsA("UIStroke")
+			if os then TweenService:Create(os,TS_FAST,{Color=T.Stroke}):Play() end
+			TweenService:Create(old.rowFrame,TS_FAST,{BackgroundColor3=T.ItemBg}):Play()
+			local nl=old.rowFrame:FindFirstChildWhichIsA("TextLabel")
+			if nl then TweenService:Create(nl,TS_FAST,{TextColor3=T.TextDim}):Play() end
+		end
+	end
+	selectedId = id
+	if id then
+		local l = findLight(id)
+		if l and l.rowFrame then
+			local s=l.rowFrame:FindFirstChildWhichIsA("UIStroke")
+			if s then TweenService:Create(s,TS_FAST,{Color=T.Accent}):Play() end
+			TweenService:Create(l.rowFrame,TS_FAST,{BackgroundColor3=T.ItemActive}):Play()
+		end
+		setExpanded(true, id)
+		if l then spawnHandles(l) end
+	else
+		destroyHandles()
+		setExpanded(false)
+	end
+end
+
+local function addLightRow(lightObj)
+	rowOrder += 1
+	emptyLbl.Visible = false
+
+	local row=mk("TextButton",explorerScroll,{
+		Size=UDim2.new(1,-4,0,34), BackgroundColor3=T.ItemBg,
+		Text="", ZIndex=7, LayoutOrder=rowOrder,
+	})
+	corner(row,6); local rs=stroke(row,T.Stroke,1)
+	lightObj.rowFrame = row
+
+	local dot=mk("Frame",row,{
+		Size=UDim2.new(0,8,0,8), Position=UDim2.new(0,8,0.5,-4),
+		BackgroundColor3=lightObj.light.Color, ZIndex=8,
+	})
+	corner(dot,4)
+	lightObj.rowDot = dot
+
+	local nameLbl=mk("TextLabel",row,{
+		Size=UDim2.new(1,-72,1,0), Position=UDim2.new(0,22,0,0),
+		BackgroundTransparency=1, Text=lightObj.name,
+		TextColor3=T.TextDim, TextSize=10, Font=Enum.Font.GothamBold,
+		TextXAlignment=Enum.TextXAlignment.Left,
+		TextTruncate=Enum.TextTruncate.AtEnd, ZIndex=8,
+	})
+	lightObj.nameLbl = nameLbl
+
+	local typeLbl=mk("TextLabel",row,{
+		Size=UDim2.new(0,28,0,16), Position=UDim2.new(1,-64,0.5,-8),
+		BackgroundColor3=T.ItemActive,
+		Text=lightObj.type:sub(1,2):upper(),
+		TextColor3=T.TextMuted, TextSize=7, Font=Enum.Font.GothamBlack,
+		TextXAlignment=Enum.TextXAlignment.Center, ZIndex=8,
+	})
+	corner(typeLbl,4)
+
+	local delBtn=mk("TextButton",row,{
+		Size=UDim2.new(0,26,0,22), Position=UDim2.new(1,-34,0.5,-11),
+		BackgroundColor3=T.Stroke, Text="DEL",
+		TextColor3=T.TextMuted, TextSize=7, Font=Enum.Font.GothamBlack, ZIndex=9,
+	})
+	corner(delBtn,5); stroke(delBtn,T.Stroke,1)
+	delBtn.MouseEnter:Connect(function() TweenService:Create(delBtn,TS_FAST,{BackgroundColor3=T.AccentDark,TextColor3=T.Text}):Play() end)
+	delBtn.MouseLeave:Connect(function() TweenService:Create(delBtn,TS_FAST,{BackgroundColor3=T.Stroke,TextColor3=T.TextMuted}):Play() end)
+	delBtn.MouseButton1Click:Connect(function()
+		local id = lightObj.id
+		if selectedId == id then selectLight(nil) end
+		if lightObj.part and lightObj.part.Parent then lightObj.part:Destroy() end
+		row:Destroy()
+		for i,l in ipairs(lightList) do
+			if l.id == id then table.remove(lightList,i); break end
+		end
+		if #lightList == 0 then emptyLbl.Visible = true end
+	end)
+
+	-- Single click = select; double click = rename
+	local lastClick = 0
+	local clickTimer = nil
+	row.MouseButton1Click:Connect(function()
+		local now = tick()
+		if now - lastClick < 0.35 then
+			if clickTimer then task.cancel(clickTimer); clickTimer=nil end
+			nameLbl.Visible = false
+			local tb=mk("TextBox",row,{
+				Size=UDim2.new(1,-72,1,0), Position=UDim2.new(0,22,0,0),
+				BackgroundColor3=T.ItemBg, Text=lightObj.name,
+				TextColor3=T.AccentBright, TextSize=10, Font=Enum.Font.GothamBold,
+				TextXAlignment=Enum.TextXAlignment.Left,
+				ClearTextOnFocus=false, ZIndex=9,
+			})
+			corner(tb,4); stroke(tb,T.Accent,1)
+			tb:CaptureFocus()
+			tb.FocusLost:Connect(function()
+				local n = tb.Text ~= "" and tb.Text or lightObj.name
+				lightObj.name = n
+				nameLbl.Text = n
+				if selectedId == lightObj.id then rightNameLbl.Text = n:upper() end
+				if lightObj.billboard then lightObj.billboard.Text = n end
+				nameLbl.Visible = true
+				tb:Destroy()
+			end)
+		else
+			clickTimer = task.delay(0.36, function()
+				clickTimer = nil
+				selectLight(lightObj.id)
+			end)
+		end
+		lastClick = now
+	end)
+
+	row.MouseEnter:Connect(function()
+		if selectedId ~= lightObj.id then
+			TweenService:Create(row,TS_FAST,{BackgroundColor3=T.ItemHover}):Play()
+			TweenService:Create(rs,TS_FAST,{Color=T.StrokeHot}):Play()
+			TweenService:Create(nameLbl,TS_FAST,{TextColor3=T.Text}):Play()
+		end
+	end)
+	row.MouseLeave:Connect(function()
+		if selectedId ~= lightObj.id then
+			TweenService:Create(row,TS_FAST,{BackgroundColor3=T.ItemBg}):Play()
+			TweenService:Create(rs,TS_FAST,{Color=T.Stroke}):Play()
+			TweenService:Create(nameLbl,TS_FAST,{TextColor3=T.TextDim}):Play()
+		end
+	end)
+
+	table.insert(lightList, lightObj)
+end
+
+local function spawnLight(templatePart)
+	local lightInst = nil
+	for _,c in ipairs(templatePart:GetChildren()) do
+		if c:IsA("PointLight") or c:IsA("SpotLight") or c:IsA("SurfaceLight") then
+			lightInst = c:Clone(); break
+		end
+	end
+	if not lightInst then return end
+
+	lightCounts[templatePart.Name] = (lightCounts[templatePart.Name] or 0) + 1
+	local name = templatePart.Name .. " " .. lightCounts[templatePart.Name]
+
+	local spawnCF = workspace.CurrentCamera.CFrame * CFrame.new(0,0,-8)
+	local char = player.Character
+	if char and char:FindFirstChild("HumanoidRootPart") then
+		spawnCF = char.HumanoidRootPart.CFrame * CFrame.new(0,2,-5)
+	end
+
+	local part = mk("Part", lightContainer, {
+		Shape=Enum.PartType.Ball,
+		Size=Vector3.new(0.4,0.4,0.4),
+		CFrame=spawnCF,
+		Anchored=true,
+		CanCollide=false,
+		CanQuery=true,
+		CanTouch=false,
+		CastShadow=false,
+		Material=Enum.Material.Neon,
+		Color=lightInst.Color,
+		Name=name,
+	})
+
+	part.LocalTransparencyModifier = panelOpen and 0 or 1
+
+	local bb = mk("BillboardGui",part,{
+		Size=UDim2.fromOffset(130,22),
+		StudsOffset=Vector3.new(0,0.7,0),
+		AlwaysOnTop=true,
+		Enabled=panelOpen,
+	})
+	local bbLbl = mk("TextLabel",bb,{
+		Size=UDim2.fromScale(1,1),
+		BackgroundTransparency=1,
+		Text=name,
+		TextColor3=Color3.new(1,1,1),
+		TextSize=11, Font=Enum.Font.GothamBlack,
+		TextStrokeTransparency=0.35,
+	})
+
+	lightInst.Parent = part
+
+	local lightObj = {
+		id=nextId(), name=name,
+		part=part, light=lightInst, type=lightInst.ClassName,
+		billboard=bbLbl, billboardGui=bb,
+		rowDot=nil, rowFrame=nil, nameLbl=nil,
+	}
+
+	addLightRow(lightObj)
+	task.defer(function() selectLight(lightObj.id) end)
+end
+
+-- ── TEMPLATES ────────────────────────────────────────────────────────────────
+task.spawn(function()
+	local templates = lightsRepo:GetChildren()
+	if #templates == 0 then
+		for i,ltype in ipairs({"PointLight","SpotLight","SurfaceLight"}) do
+			local p = Instance.new("Part"); p.Name = ltype:gsub("Light","")
+			local li = Instance.new(ltype,p); li.Brightness=2; li.Range=20
+			table.insert(templates, p)
+		end
+	end
+	for i,tmpl in ipairs(templates) do
+		local li = tmpl:FindFirstChildWhichIsA("PointLight")
+			or tmpl:FindFirstChildWhichIsA("SpotLight")
+			or tmpl:FindFirstChildWhichIsA("SurfaceLight")
+		local col = li and li.Color or T.Accent
+
+		local btn=mk("TextButton",tmplScroll,{
+			Size=UDim2.new(0,72,0,48), BackgroundColor3=T.ItemBg,
+			Text="", ZIndex=7, LayoutOrder=i,
+		})
+		corner(btn,8); local bs=stroke(btn,T.Stroke,1)
+
+		local dot=mk("Frame",btn,{
+			Size=UDim2.new(0,10,0,10), AnchorPoint=Vector2.new(0.5,0),
+			Position=UDim2.new(0.5,0,0,8),
+			BackgroundColor3=col, ZIndex=8,
+		})
+		corner(dot,5)
+		mk("Frame",dot,{
+			Size=UDim2.new(0.8,0,0.8,0), AnchorPoint=Vector2.new(0.5,0.5),
+			Position=UDim2.new(0.5,0,0.5,0),
+			BackgroundColor3=Color3.new(1,1,1), BackgroundTransparency=0.4,
+			ZIndex=9,
+		}).Parent = dot
+
+		mk("TextLabel",btn,{
+			Size=UDim2.new(1,0,0,18), Position=UDim2.new(0,0,1,-20),
+			BackgroundTransparency=1, Text=tmpl.Name:upper(),
+			TextColor3=T.TextDim, TextSize=7, Font=Enum.Font.GothamBlack,
+			TextXAlignment=Enum.TextXAlignment.Center, ZIndex=8,
+		})
+
+		btn.MouseEnter:Connect(function()
+			TweenService:Create(btn,TS_FAST,{BackgroundColor3=T.ItemHover}):Play()
+			TweenService:Create(bs,TS_FAST,{Color=T.StrokeHot}):Play()
+		end)
+		btn.MouseLeave:Connect(function()
+			TweenService:Create(btn,TS_FAST,{BackgroundColor3=T.ItemBg}):Play()
+			TweenService:Create(bs,TS_FAST,{Color=T.Stroke}):Play()
+		end)
+		btn.MouseButton1Click:Connect(function()
+			spawnLight(tmpl)
+			TweenService:Create(btn,TweenInfo.new(0.07,Enum.EasingStyle.Back,Enum.EasingDirection.In),{Size=UDim2.new(0,64,0,42)}):Play()
+			task.delay(0.08,function() TweenService:Create(btn,TweenInfo.new(0.2,Enum.EasingStyle.Back,Enum.EasingDirection.Out),{Size=UDim2.new(0,72,0,48)}):Play() end)
+		end)
+	end
+end)
+
+-- ── IN-WORLD CLICK ────────────────────────────────────────────────────────────
+UserInputService.InputBegan:Connect(function(inp, gpe)
+	if not panelOpen or gpe then return end
+	if inp.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
+	local parts = {}
+	for _,l in ipairs(lightList) do if l.part then table.insert(parts,l.part) end end
+	if #parts == 0 then return end
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Include
+	params.FilterDescendantsInstances = parts
+	local mouse = UserInputService:GetMouseLocation()
+	local ray = workspace.CurrentCamera:ScreenPointToRay(mouse.X, mouse.Y)
+	local result = workspace:Raycast(ray.Origin, ray.Direction * 500, params)
+	if result then
+		for _,l in ipairs(lightList) do
+			if l.part == result.Instance then selectLight(l.id); return end
+		end
+	end
+end)
+
+-- ── SLIDER DRAG ───────────────────────────────────────────────────────────────
+UserInputService.InputChanged:Connect(function(inp)
+	if dragging and inp.UserInputType == Enum.UserInputType.MouseMovement then
+		local t = dragging.track
+		local a = math.clamp((inp.Position.X - t.AbsolutePosition.X) / t.AbsoluteSize.X, 0, 1)
+		dragging.set(a)
+	end
+end)
+UserInputService.InputEnded:Connect(function(inp)
+	if inp.UserInputType == Enum.UserInputType.MouseButton1 then dragging = nil end
+end)
+
+-- ── PANEL TOGGLE ──────────────────────────────────────────────────────────────
+task.spawn(function()
+	toggleEvent.Event:Connect(function(state)
+		panelOpen = state
+		for _,l in ipairs(lightList) do
+			if l.billboardGui then l.billboardGui.Enabled = state end
+			if l.part then l.part.LocalTransparencyModifier = state and 0 or 1 end
+		end
+		TweenService:Create(mainPanel, TS, {Position = state and POS_OPEN or POS_CLOSED}):Play()
+		if not state then
+			if isExpanded then setExpanded(false) end
+			destroyHandles()
+		end
+	end)
+end)
+
+player.CharacterAdded:Connect(function()
+	destroyHandles(); selectedId = nil
+end)
+
+-- ── RENDER LOOP ───────────────────────────────────────────────────────────────
+RunService.RenderStepped:Connect(function(dt)
+	for _, p in ipairs(particles) do
+		p.y -= p.speed * dt
+		if p.y < -0.1 then p.y=1.08; p.baseX=rng:NextNumber(0,1) end
+		p.gui.Position = UDim2.new(p.baseX + math.sin(tick()*p.freq+p.seed)*p.amp, 0, p.y, 0)
+	end
+	for _,l in ipairs(lightList) do
+		if l.part and l.part.Parent then
+			l.part.Color = l.light.Color
+			if l.rowDot   then l.rowDot.BackgroundColor3 = l.light.Color end
+			if l.billboard then l.billboard.Text = l.name end
+		end
+	end
+end)
