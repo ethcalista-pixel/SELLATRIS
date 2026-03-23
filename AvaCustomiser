@@ -1,0 +1,1195 @@
+local Players = game:GetService("Players")
+local TweenService = game:GetService("TweenService")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Lighting = game:GetService("Lighting")
+local KeyframeSequenceProvider = game:GetService("KeyframeSequenceProvider")
+
+local BarEvents   = ReplicatedStorage:WaitForChild("BarEvents", 10)
+local toggleEvent = BarEvents and BarEvents:WaitForChild("ToggleAvatarCustomizer", 10)
+
+local player      = Players.LocalPlayer
+local remote      = ReplicatedStorage:WaitForChild("ApplyAvatarCustomization")
+local morphsFolder = ReplicatedStorage:WaitForChild("MORPHS")
+
+-- ═══════════════════════════════════════════════════
+--  THEME
+-- ═══════════════════════════════════════════════════
+local THEME = {
+	Bg          = Color3.fromRGB(11, 6, 6),
+	Panel       = Color3.fromRGB(19, 11, 11),
+	PanelTop    = Color3.fromRGB(27, 16, 16),
+	ItemBg      = Color3.fromRGB(30, 17, 17),
+	ItemHover   = Color3.fromRGB(46, 24, 24),
+	ItemActive  = Color3.fromRGB(90, 18, 18),
+	Accent      = Color3.fromRGB(255, 58, 58),
+	AccentBright= Color3.fromRGB(255, 115, 115),
+	AccentDark  = Color3.fromRGB(160, 18, 18),
+	AccentDeep  = Color3.fromRGB(110, 10, 10),
+	Text        = Color3.fromRGB(255, 255, 255),
+	TextDim     = Color3.fromRGB(185, 150, 150),
+	TextMuted   = Color3.fromRGB(108, 70, 70),
+	Stroke      = Color3.fromRGB(58, 30, 30),
+	StrokeHot   = Color3.fromRGB(115, 45, 45),
+	Green       = Color3.fromRGB(75, 215, 105),
+	GreenDark   = Color3.fromRGB(30, 110, 50),
+}
+
+-- Panel layout constants
+local PANEL_W  = 300
+local PANEL_H  = 480
+local RIGHT_W  = 256
+local EXPAND_W = PANEL_W + RIGHT_W   -- 556
+
+-- ═══════════════════════════════════════════════════
+--  ROTATION LAG CONFIG
+-- ═══════════════════════════════════════════════════
+local SWING_SPEED      = 11
+local SWING_INPUT_MULT = 0.14
+local ARM_PITCH_MULT   = 1.0
+local ARM_ROLL_MULT    = 0.38
+local TORSO_YAW_MULT   = 1
+local TORSO_ROLL_MULT  = 0.01
+local HEAD_COUNTER_YAW = 0.1
+
+-- Tween presets
+local TS      = TweenInfo.new(0.42, Enum.EasingStyle.Quart, Enum.EasingDirection.Out)
+local TS_FAST = TweenInfo.new(0.17, Enum.EasingStyle.Quart, Enum.EasingDirection.Out)
+local TS_SLOW = TweenInfo.new(0.6,  Enum.EasingStyle.Quart, Enum.EasingDirection.Out)
+
+-- ═══════════════════════════════════════════════════
+--  HELPERS
+-- ═══════════════════════════════════════════════════
+local function corner(p, r)
+	local c = Instance.new("UICorner")
+	c.CornerRadius = UDim.new(0, r or 8)
+	c.Parent = p
+	return c
+end
+
+local function stroke(p, col, thick)
+	local s = Instance.new("UIStroke")
+	s.Color = col or THEME.Stroke
+	s.Thickness = thick or 1
+	s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+	s.Parent = p
+	return s
+end
+
+local function gradient(p, c0, c1, rot)
+	local g = Instance.new("UIGradient")
+	g.Color = ColorSequence.new{
+		ColorSequenceKeypoint.new(0, c0),
+		ColorSequenceKeypoint.new(1, c1)
+	}
+	g.Rotation = rot or 90
+	g.Parent = p
+	return g
+end
+
+-- ═══════════════════════════════════════════════════
+--  LIGHTING
+-- ═══════════════════════════════════════════════════
+local blurEffect = Instance.new("BlurEffect")
+blurEffect.Size = 0
+blurEffect.Parent = Lighting
+
+-- ═══════════════════════════════════════════════════
+--  SCREEN GUI
+-- ═══════════════════════════════════════════════════
+local gui = Instance.new("ScreenGui")
+gui.Name = "AvatarCustomizerGUI"
+gui.ResetOnSpawn = false
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+gui.IgnoreGuiInset = true
+gui.Parent = player:WaitForChild("PlayerGui")
+
+-- ═══════════════════════════════════════════════════
+--  MAIN PANEL  (starts off-screen, driven by BarEvents)
+-- ═══════════════════════════════════════════════════
+local mainPanel = Instance.new("Frame")
+mainPanel.Size            = UDim2.new(0, PANEL_W, 0, PANEL_H)
+mainPanel.Position        = UDim2.new(0.5, 0, 1, PANEL_H + 20)
+mainPanel.AnchorPoint     = Vector2.new(0.5, 1)
+mainPanel.BackgroundColor3 = THEME.Panel
+mainPanel.ClipsDescendants = true
+mainPanel.ZIndex = 5
+mainPanel.Parent = gui
+corner(mainPanel, 14)
+stroke(mainPanel, THEME.Stroke, 1.5)
+
+-- Deep diagonal gradient background
+local panelBg = Instance.new("UIGradient")
+panelBg.Color = ColorSequence.new{
+	ColorSequenceKeypoint.new(0,    Color3.fromRGB(29, 16, 16)),
+	ColorSequenceKeypoint.new(0.55, Color3.fromRGB(18, 10, 10)),
+	ColorSequenceKeypoint.new(1,    Color3.fromRGB(11, 6, 6)),
+}
+panelBg.Rotation = 130
+panelBg.Parent = mainPanel
+
+-- ═══════════════════════════════════════════════════
+--  BACKGROUND PARTICLES (ember glow)
+-- ═══════════════════════════════════════════════════
+local particlesContainer = Instance.new("Frame")
+particlesContainer.Size = UDim2.new(1,0,1,0)
+particlesContainer.BackgroundTransparency = 1
+particlesContainer.ZIndex = 1
+particlesContainer.Parent = mainPanel
+
+local particles = {}
+local rng = Random.new()
+
+for i = 1, 20 do
+	local p = Instance.new("Frame")
+	local sz = rng:NextNumber(4, 22)
+	p.Size = UDim2.new(0, sz, 0, sz)
+	p.BackgroundColor3 = (i % 5 == 0) and THEME.AccentBright or THEME.Accent
+	p.BackgroundTransparency = rng:NextNumber(0.88, 0.97)
+	p.BorderSizePixel = 0
+	p.ZIndex = 1
+	corner(p, 50)
+	p.Parent = particlesContainer
+	table.insert(particles, {
+		gui   = p,
+		baseX = rng:NextNumber(0, 1),
+		y     = rng:NextNumber(0, 1),
+		speed = rng:NextNumber(0.012, 0.052),
+		amp   = rng:NextNumber(0.012, 0.048),
+		freq  = rng:NextNumber(0.4, 2.2),
+		seed  = rng:NextNumber(0, math.pi * 2),
+	})
+end
+
+-- ═══════════════════════════════════════════════════
+--  LEFT CONTAINER
+-- ═══════════════════════════════════════════════════
+local leftContainer = Instance.new("Frame")
+leftContainer.Size = UDim2.new(0, PANEL_W, 1, 0)
+leftContainer.BackgroundTransparency = 1
+leftContainer.ZIndex = 5
+leftContainer.Parent = mainPanel
+
+-- ── Title Bar ──────────────────────────────────────
+local titleBar = Instance.new("Frame")
+titleBar.Size = UDim2.new(1, 0, 0, 50)
+titleBar.BackgroundColor3 = THEME.PanelTop
+titleBar.ZIndex = 6
+titleBar.Parent = leftContainer
+corner(titleBar, 14)
+
+local titleFlat = Instance.new("Frame")
+titleFlat.Size = UDim2.new(1, 0, 0, 14)
+titleFlat.Position = UDim2.new(0, 0, 1, -14)
+titleFlat.BackgroundColor3 = THEME.PanelTop
+titleFlat.ZIndex = 6
+titleFlat.Parent = titleBar
+
+local accentLine = Instance.new("Frame")
+accentLine.Size = UDim2.new(1, 0, 0, 2)
+accentLine.Position = UDim2.new(0, 0, 1, -1)
+accentLine.BackgroundColor3 = Color3.new(1, 1, 1)
+accentLine.ZIndex = 7
+accentLine.Parent = titleBar
+gradient(accentLine, THEME.AccentDeep, THEME.Accent, 0)
+
+local titleDot = Instance.new("Frame")
+titleDot.Size = UDim2.new(0, 7, 0, 7)
+titleDot.Position = UDim2.new(0, 14, 0.5, -3)
+titleDot.BackgroundColor3 = THEME.Accent
+titleDot.ZIndex = 8
+titleDot.Parent = titleBar
+corner(titleDot, 4)
+stroke(titleDot, THEME.AccentBright, 1)
+
+local titleLbl = Instance.new("TextLabel")
+titleLbl.Name = "TextLabel"
+titleLbl.Size = UDim2.new(1, -36, 1, 0)
+titleLbl.Position = UDim2.new(0, 28, 0, 0)
+titleLbl.BackgroundTransparency = 1
+titleLbl.Text = "AVATAR CUSTOMIZER"
+titleLbl.TextColor3 = THEME.Text
+titleLbl.TextSize = 11
+titleLbl.Font = Enum.Font.GothamBlack
+titleLbl.TextXAlignment = Enum.TextXAlignment.Left
+titleLbl.ZIndex = 7
+titleLbl.Parent = titleBar
+
+-- ── Viewport Container ──────────────────────────────
+local vpfOuter = Instance.new("Frame")
+vpfOuter.Size = UDim2.new(1, -24, 0, 214)
+vpfOuter.Position = UDim2.new(0, 12, 0, 58)
+vpfOuter.BackgroundColor3 = Color3.fromRGB(7, 3, 3)
+vpfOuter.ZIndex = 5
+vpfOuter.Parent = leftContainer
+corner(vpfOuter, 10)
+stroke(vpfOuter, THEME.Stroke, 1.5)
+
+local vpf = Instance.new("ViewportFrame")
+vpf.Size = UDim2.new(1, 0, 1, 0)
+vpf.BackgroundTransparency = 1
+vpf.BorderSizePixel = 0
+vpf.ZIndex = 5
+vpf.Parent = vpfOuter
+
+local worldModel = Instance.new("WorldModel")
+worldModel.Parent = vpf
+local camera = Instance.new("Camera")
+camera.FieldOfView = 35
+vpf.CurrentCamera = camera
+
+-- Global animation state
+local currentAnimTrack = nil
+local isAnimEnabled    = true
+local originalC0s      = {}
+local currentSwingAngle = 0
+
+-- ── Anim Toggle ─────────────────────────────────────
+local animToggleBtn = Instance.new("TextButton")
+animToggleBtn.Size = UDim2.new(0, 76, 0, 22)
+animToggleBtn.Position = UDim2.new(1, -88, 0, 63)
+animToggleBtn.BackgroundColor3 = Color3.fromRGB(14, 7, 7)
+animToggleBtn.BackgroundTransparency = 0.1
+animToggleBtn.Text = "ANIM ON"
+animToggleBtn.TextColor3 = THEME.Accent
+animToggleBtn.TextSize = 9
+animToggleBtn.Font = Enum.Font.GothamBold
+animToggleBtn.ZIndex = 10
+animToggleBtn.Parent = leftContainer
+corner(animToggleBtn, 5)
+stroke(animToggleBtn, THEME.Stroke, 1)
+
+animToggleBtn.MouseButton1Click:Connect(function()
+	isAnimEnabled = not isAnimEnabled
+	if isAnimEnabled then
+		animToggleBtn.Text = "ANIM ON"
+		TweenService:Create(animToggleBtn, TS_FAST, {TextColor3 = THEME.Accent}):Play()
+		if currentAnimTrack then currentAnimTrack:Play() end
+	else
+		animToggleBtn.Text = "ANIM OFF"
+		TweenService:Create(animToggleBtn, TS_FAST, {TextColor3 = THEME.TextMuted}):Play()
+		if currentAnimTrack then currentAnimTrack:Stop() end
+	end
+end)
+
+-- ── Zoom Slider ─────────────────────────────────────
+local zoomBar = Instance.new("Frame")
+zoomBar.Size = UDim2.new(1, -24, 0, 32)
+zoomBar.Position = UDim2.new(0, 12, 1, -196)
+zoomBar.AnchorPoint = Vector2.new(0, 1)
+zoomBar.BackgroundColor3 = THEME.ItemBg
+zoomBar.ZIndex = 5
+zoomBar.Parent = leftContainer
+corner(zoomBar, 8)
+stroke(zoomBar, THEME.Stroke)
+
+local zoomMinusLbl = Instance.new("TextLabel")
+zoomMinusLbl.Size = UDim2.new(0, 28, 1, 0)
+zoomMinusLbl.BackgroundTransparency = 1
+zoomMinusLbl.Text = "−"
+zoomMinusLbl.TextColor3 = THEME.TextMuted
+zoomMinusLbl.TextSize = 20
+zoomMinusLbl.Font = Enum.Font.GothamBold
+zoomMinusLbl.ZIndex = 6
+zoomMinusLbl.Parent = zoomBar
+
+local zoomPlusLbl = zoomMinusLbl:Clone()
+zoomPlusLbl.Position = UDim2.new(1, -28, 0, 0)
+zoomPlusLbl.Text = "+"
+zoomPlusLbl.Parent = zoomBar
+
+local zoomTrack = Instance.new("Frame")
+zoomTrack.Size = UDim2.new(1, -60, 0, 4)
+zoomTrack.Position = UDim2.new(0, 30, 0.5, -2)
+zoomTrack.BackgroundColor3 = THEME.Stroke
+zoomTrack.ZIndex = 6
+zoomTrack.Parent = zoomBar
+corner(zoomTrack, 2)
+
+local zoomFill = Instance.new("Frame")
+zoomFill.Size = UDim2.new(0.5, 0, 1, 0)
+zoomFill.BackgroundColor3 = THEME.Accent
+zoomFill.ZIndex = 7
+zoomFill.Parent = zoomTrack
+corner(zoomFill, 2)
+
+local zoomKnob = Instance.new("TextButton")
+zoomKnob.Size = UDim2.new(0, 14, 0, 14)
+zoomKnob.Position = UDim2.new(0.5, -7, 0.5, -7)
+zoomKnob.BackgroundColor3 = THEME.Text
+zoomKnob.Text = ""
+zoomKnob.ZIndex = 8
+zoomKnob.Parent = zoomTrack
+corner(zoomKnob, 7)
+
+-- ── Category Section ─────────────────────────────────
+local catSection = Instance.new("Frame")
+catSection.Size = UDim2.new(1, -24, 0, 96)
+catSection.Position = UDim2.new(0, 12, 1, -56)
+catSection.AnchorPoint = Vector2.new(0, 1)
+catSection.BackgroundTransparency = 1
+catSection.ZIndex = 5
+catSection.Parent = leftContainer
+
+local catHeaderLbl = Instance.new("TextLabel")
+catHeaderLbl.Size = UDim2.new(1, 0, 0, 16)
+catHeaderLbl.BackgroundTransparency = 1
+catHeaderLbl.Text = "CUSTOMIZE"
+catHeaderLbl.TextColor3 = THEME.TextMuted
+catHeaderLbl.TextSize = 9
+catHeaderLbl.Font = Enum.Font.GothamBold
+catHeaderLbl.TextXAlignment = Enum.TextXAlignment.Left
+catHeaderLbl.ZIndex = 5
+catHeaderLbl.Parent = catSection
+
+local catGrid = Instance.new("Frame")
+catGrid.Size = UDim2.new(1, 0, 1, -20)
+catGrid.Position = UDim2.new(0, 0, 0, 20)
+catGrid.BackgroundTransparency = 1
+catGrid.ZIndex = 5
+catGrid.Parent = catSection
+
+local gridLayout = Instance.new("UIGridLayout")
+gridLayout.CellSize    = UDim2.new(0.5, -4, 0, 32)
+gridLayout.CellPadding = UDim2.new(0, 8, 0, 5)
+gridLayout.SortOrder   = Enum.SortOrder.LayoutOrder
+gridLayout.Parent      = catGrid
+
+local activeCatBtn = nil
+
+local function makeCatBtn(name, order)
+	local btn = Instance.new("TextButton")
+	btn.BackgroundColor3 = THEME.ItemBg
+	btn.Text = name:upper()
+	btn.Font = Enum.Font.GothamBold
+	btn.TextColor3 = THEME.TextDim
+	btn.TextSize = 10
+	btn.LayoutOrder = order
+	btn.ZIndex = 6
+	corner(btn, 8)
+	local s = stroke(btn, THEME.Stroke, 1)
+	btn.Parent = catGrid
+
+	btn.MouseEnter:Connect(function()
+		if activeCatBtn ~= btn then
+			TweenService:Create(btn, TS_FAST, {TextColor3 = THEME.Text, BackgroundColor3 = THEME.ItemHover}):Play()
+			TweenService:Create(s, TS_FAST, {Color = THEME.StrokeHot}):Play()
+		end
+	end)
+	btn.MouseLeave:Connect(function()
+		if activeCatBtn ~= btn then
+			TweenService:Create(btn, TS_FAST, {TextColor3 = THEME.TextDim, BackgroundColor3 = THEME.ItemBg}):Play()
+			TweenService:Create(s, TS_FAST, {Color = THEME.Stroke}):Play()
+		end
+	end)
+	return btn
+end
+
+local topBtn = makeCatBtn("Top",    1)
+local botBtn = makeCatBtn("Bottom", 2)
+local dihBtn = makeCatBtn("Dih",    3)
+local puhBtn = makeCatBtn("Puh",    4)
+
+local function setCatActive(btn)
+	if activeCatBtn and activeCatBtn ~= btn then
+		local old = activeCatBtn
+		TweenService:Create(old, TS_FAST, {TextColor3 = THEME.TextDim, BackgroundColor3 = THEME.ItemBg}):Play()
+		local os = old:FindFirstChildWhichIsA("UIStroke")
+		if os then TweenService:Create(os, TS_FAST, {Color = THEME.Stroke}):Play() end
+	end
+	activeCatBtn = btn
+	TweenService:Create(btn, TS_FAST, {TextColor3 = THEME.Text, BackgroundColor3 = THEME.ItemActive}):Play()
+	local s = btn:FindFirstChildWhichIsA("UIStroke")
+	if s then TweenService:Create(s, TS_FAST, {Color = THEME.Accent}):Play() end
+end
+
+local function clearCatActive()
+	if activeCatBtn then
+		TweenService:Create(activeCatBtn, TS_FAST, {TextColor3 = THEME.TextDim, BackgroundColor3 = THEME.ItemBg}):Play()
+		local s = activeCatBtn:FindFirstChildWhichIsA("UIStroke")
+		if s then TweenService:Create(s, TS_FAST, {Color = THEME.Stroke}):Play() end
+		activeCatBtn = nil
+	end
+end
+
+-- ── Apply Button ────────────────────────────────────
+local applyBtn = Instance.new("TextButton")
+applyBtn.Size = UDim2.new(1, -24, 0, 42)
+applyBtn.Position = UDim2.new(0, 12, 1, -6)
+applyBtn.AnchorPoint = Vector2.new(0, 1)
+applyBtn.BackgroundColor3 = Color3.new(1, 1, 1)
+applyBtn.Text = ""
+applyBtn.ZIndex = 6
+applyBtn.Parent = leftContainer
+corner(applyBtn, 10)
+stroke(applyBtn, THEME.AccentDark, 1)
+gradient(applyBtn, THEME.Accent, THEME.AccentDark)
+
+local applyLbl = Instance.new("TextLabel")
+applyLbl.Name = "ApplyLabel"
+applyLbl.Size = UDim2.new(1, 0, 1, 0)
+applyLbl.BackgroundTransparency = 1
+applyLbl.Text = "APPLY TO CHARACTER  →"
+applyLbl.TextColor3 = THEME.Text
+applyLbl.TextSize = 12
+applyLbl.Font = Enum.Font.GothamBlack
+applyLbl.ZIndex = 7
+applyLbl.Parent = applyBtn
+
+applyBtn.MouseEnter:Connect(function()
+	TweenService:Create(applyBtn, TS_FAST, {
+		Size     = UDim2.new(1, -20, 0, 44),
+		Position = UDim2.new(0, 10, 1, -6),
+	}):Play()
+end)
+applyBtn.MouseLeave:Connect(function()
+	TweenService:Create(applyBtn, TS_FAST, {
+		Size     = UDim2.new(1, -24, 0, 42),
+		Position = UDim2.new(0, 12, 1, -6),
+	}):Play()
+end)
+
+-- ═══════════════════════════════════════════════════
+--  RIGHT CONTAINER  (selection panel, slides in)
+-- ═══════════════════════════════════════════════════
+local rightContainer = Instance.new("CanvasGroup")
+rightContainer.Size = UDim2.new(0, RIGHT_W, 1, 0)
+rightContainer.Position = UDim2.new(0, PANEL_W, 0, 0)
+rightContainer.BackgroundTransparency = 1
+rightContainer.GroupTransparency = 1
+rightContainer.ZIndex = 5
+rightContainer.Parent = mainPanel
+
+local rightBg = Instance.new("Frame")
+rightBg.Size = UDim2.new(1, 0, 1, 0)
+rightBg.BackgroundColor3 = Color3.fromRGB(17, 10, 10)
+rightBg.ZIndex = 4
+rightBg.Parent = rightContainer
+corner(rightBg, 14)
+stroke(rightBg, THEME.Stroke, 1.5)
+
+local rightBgGrad = Instance.new("UIGradient")
+rightBgGrad.Color = ColorSequence.new{
+	ColorSequenceKeypoint.new(0, Color3.fromRGB(25, 14, 14)),
+	ColorSequenceKeypoint.new(1, Color3.fromRGB(12, 7, 7)),
+}
+rightBgGrad.Rotation = 130
+rightBgGrad.Parent = rightBg
+
+local rightTitleBar = Instance.new("Frame")
+rightTitleBar.Size = UDim2.new(1, 0, 0, 50)
+rightTitleBar.BackgroundColor3 = THEME.PanelTop
+rightTitleBar.ZIndex = 6
+rightTitleBar.Parent = rightContainer
+corner(rightTitleBar, 14)
+
+local rightTitleFlat = Instance.new("Frame")
+rightTitleFlat.Size = UDim2.new(1, 0, 0, 14)
+rightTitleFlat.Position = UDim2.new(0, 0, 1, -14)
+rightTitleFlat.BackgroundColor3 = THEME.PanelTop
+rightTitleFlat.ZIndex = 6
+rightTitleFlat.Parent = rightTitleBar
+
+local rightAccentLine = Instance.new("Frame")
+rightAccentLine.Size = UDim2.new(1, 0, 0, 2)
+rightAccentLine.Position = UDim2.new(0, 0, 1, -1)
+rightAccentLine.BackgroundColor3 = Color3.new(1, 1, 1)
+rightAccentLine.ZIndex = 7
+rightAccentLine.Parent = rightTitleBar
+gradient(rightAccentLine, THEME.AccentDeep, THEME.Accent, 0)
+
+local rightTitleLbl = Instance.new("TextLabel")
+rightTitleLbl.Name = "TextLabel"
+rightTitleLbl.Size = UDim2.new(1, -78, 1, 0)
+rightTitleLbl.Position = UDim2.new(0, 14, 0, 0)
+rightTitleLbl.BackgroundTransparency = 1
+rightTitleLbl.Text = "SELECT STYLE"
+rightTitleLbl.TextColor3 = THEME.TextDim
+rightTitleLbl.TextSize = 11
+rightTitleLbl.Font = Enum.Font.GothamBlack
+rightTitleLbl.TextXAlignment = Enum.TextXAlignment.Left
+rightTitleLbl.ZIndex = 7
+rightTitleLbl.Parent = rightTitleBar
+
+local closeBtn = Instance.new("TextButton")
+closeBtn.Size = UDim2.new(0, 46, 0, 26)
+closeBtn.Position = UDim2.new(1, -54, 0.5, -13)
+closeBtn.BackgroundColor3 = THEME.Stroke
+closeBtn.Text = "CLOSE"
+closeBtn.TextColor3 = THEME.TextDim
+closeBtn.TextSize = 11
+closeBtn.Font = Enum.Font.GothamBold
+closeBtn.ZIndex = 8
+closeBtn.Parent = rightTitleBar
+corner(closeBtn, 6)
+stroke(closeBtn, THEME.Stroke)
+
+closeBtn.MouseEnter:Connect(function()
+	TweenService:Create(closeBtn, TS_FAST, {BackgroundColor3 = THEME.AccentDark, TextColor3 = THEME.Text}):Play()
+end)
+closeBtn.MouseLeave:Connect(function()
+	TweenService:Create(closeBtn, TS_FAST, {BackgroundColor3 = THEME.Stroke, TextColor3 = THEME.TextDim}):Play()
+end)
+
+local countBadge = Instance.new("Frame")
+countBadge.Size = UDim2.new(0, 20, 0, 18)
+countBadge.Position = UDim2.new(1, -64, 0.5, -9)
+countBadge.BackgroundColor3 = THEME.Accent
+countBadge.ZIndex = 8
+countBadge.Parent = rightTitleBar
+corner(countBadge, 5)
+
+local countLbl = Instance.new("TextLabel")
+countLbl.Size = UDim2.new(1, 0, 1, 0)
+countLbl.BackgroundTransparency = 1
+countLbl.Text = "0"
+countLbl.TextColor3 = THEME.Text
+countLbl.TextSize = 9
+countLbl.Font = Enum.Font.GothamBold
+countLbl.ZIndex = 9
+countLbl.Parent = countBadge
+
+local secScroll = Instance.new("ScrollingFrame")
+secScroll.Size = UDim2.new(1, -16, 1, -58)
+secScroll.Position = UDim2.new(0, 8, 0, 54)
+secScroll.BackgroundTransparency = 1
+secScroll.BorderSizePixel = 0
+secScroll.ScrollBarThickness = 3
+secScroll.VerticalScrollBarInset = Enum.ScrollBarInset.ScrollBar
+secScroll.ScrollBarImageColor3 = THEME.Accent
+secScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+secScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+secScroll.ZIndex = 5
+secScroll.Parent = rightContainer
+
+local secPadding = Instance.new("UIPadding")
+secPadding.PaddingBottom = UDim.new(0, 10)
+secPadding.PaddingTop    = UDim.new(0, 4)
+secPadding.Parent = secScroll
+
+local secList = Instance.new("UIListLayout")
+secList.Padding             = UDim.new(0, 6)
+secList.HorizontalAlignment = Enum.HorizontalAlignment.Center
+secList.Parent = secScroll
+
+-- ═══════════════════════════════════════════════════
+--  FUNCTIONAL STATE
+-- ═══════════════════════════════════════════════════
+local panelOpen       = false
+local isExpanded      = false
+local isTransitioning = false
+local dummy           = nil
+
+local isDragging, dragMoved = false, false
+local isZoomDragging        = false
+local lastMousePos          = Vector2.new()
+
+local targetCamAngleX      = math.rad(180)
+local currentCamAngleX     = targetCamAngleX
+local targetCameraDistance  = 10
+local currentCameraDistance = 10
+
+local pendingChanges = {}
+
+local categoryDisplayNames = {
+	["Torso"]    = "TORSO",    ["LeftArm"]  = "LEFT ARM",
+	["RightArm"] = "RIGHT ARM",["LeftLeg"]  = "LEFT LEG",
+	["RightLeg"] = "RIGHT LEG",["Top"]      = "TOP",
+	["Bottom"]   = "BOTTOM",   ["Dih"]      = "DIH",
+	["Puh"]      = "PUH",
+}
+
+local catBtnMap = {
+	["Top"] = topBtn, ["Bottom"] = botBtn,
+	["Dih"] = dihBtn, ["Puh"]    = puhBtn,
+}
+
+local function getPlayerSkinTone(char)
+	if char then
+		local bc = char:FindFirstChildWhichIsA("BodyColors")
+		if bc then return bc.HeadColor3 end
+		local head = char:FindFirstChild("Head")
+		if head and head:IsA("BasePart") then return head.Color end
+	end
+	return Color3.new(1, 0.8, 0.6)
+end
+
+local function getLimbs(character, category)
+	local limbs = {}
+	if category == "Torso"    then table.insert(limbs, character:FindFirstChild("Torso"))
+	elseif category == "LeftArm"  then table.insert(limbs, character:FindFirstChild("Left Arm"))
+	elseif category == "RightArm" then table.insert(limbs, character:FindFirstChild("Right Arm"))
+	elseif category == "LeftLeg"  then table.insert(limbs, character:FindFirstChild("Left Leg"))
+	elseif category == "RightLeg" then table.insert(limbs, character:FindFirstChild("Right Leg"))
+	end
+	local actual = {}
+	for _, l in pairs(limbs) do if l then table.insert(actual, l) end end
+	return actual
+end
+
+local function ApplyPositioningLogic(morphModel, character, category)
+	local function WeldGroup(model)
+		for _, child in pairs(model:GetChildren()) do
+			if child:IsA("Model") or child:IsA("Folder") then
+				WeldGroup(child)
+			elseif child:IsA("BasePart") then
+				child.Anchored   = false
+				child.Massless   = true
+				child.CanCollide = false
+				if child.Name == "Middle" or child:FindFirstChild("Hidden") then
+					child.Transparency = 1
+				end
+				if model:FindFirstChild("Middle") and child ~= model.Middle then
+					local w = Instance.new("Weld")
+					w.Part0 = model.Middle
+					w.Part1 = child
+					w.C0 = model.Middle.CFrame:inverse() * CFrame.new(model.Middle.Position)
+					w.C1 = child.CFrame:inverse()         * CFrame.new(model.Middle.Position)
+					w.Parent = model.Middle
+				end
+			end
+		end
+	end
+	WeldGroup(morphModel)
+
+	local function SetupMotor(obj, parentPart, offset)
+		if not obj or not obj:FindFirstChild("Middle") or not parentPart then return end
+		local m6dName = "M6D" .. obj.Name
+		if parentPart:FindFirstChild(m6dName) then parentPart[m6dName]:Destroy() end
+		local m6d = Instance.new("Motor6D")
+		m6d.Name   = m6dName
+		m6d.Part0  = parentPart
+		m6d.Part1  = obj.Middle
+		m6d.C0     = offset
+		m6d.C1     = CFrame.new(0,0,0)
+		m6d:SetAttribute("MorphCategory", category)
+		m6d.Parent = parentPart
+		obj.Middle.Name = m6dName
+	end
+
+	local torso = character:FindFirstChild("Torso")
+	if torso then
+		if morphModel:FindFirstChild("Rod")    then SetupMotor(morphModel.Rod,    torso, CFrame.new(0, -torso.Size.Y/2, -torso.Size.Z/2)) end
+		if morphModel:FindFirstChild("Orbs")   then SetupMotor(morphModel.Orbs,   torso, CFrame.new(0, -torso.Size.Y/2, -torso.Size.Z/2)) end
+		if morphModel:FindFirstChild("UpperL") then SetupMotor(morphModel.UpperL, torso, CFrame.new(-torso.Size.X/8,  torso.Size.Y/2, -torso.Size.Z/2)) end
+		if morphModel:FindFirstChild("UpperR") then SetupMotor(morphModel.UpperR, torso, CFrame.new( torso.Size.X/8,  torso.Size.Y/2, -torso.Size.Z/2)) end
+		if morphModel:FindFirstChild("LowerL") then SetupMotor(morphModel.LowerL, torso, CFrame.new(-torso.Size.X/8, -torso.Size.Y/2,  torso.Size.Z/2)) end
+		if morphModel:FindFirstChild("LowerR") then SetupMotor(morphModel.LowerR, torso, CFrame.new( torso.Size.X/8, -torso.Size.Y/2,  torso.Size.Z/2)) end
+
+		local staticNames = {"UpperStatic","UpperStaticA","UpperStaticB","LowerStatic","LowerStaticA","LowerStaticB","RearStatic","TorsoAcc","Cage"}
+		for _, name in pairs(staticNames) do
+			if morphModel:FindFirstChild(name) then
+				local obj = morphModel[name]
+				if obj:FindFirstChild("Middle") then
+					local w = Instance.new("Weld")
+					w.Part0 = torso; w.Part1 = obj.Middle
+					w.C0 = CFrame.new(0,0,0)
+					w:SetAttribute("MorphCategory", category)
+					w.Parent = w.Part0
+				end
+			end
+		end
+	end
+
+	local limbMap = {
+		["HeadAcc"]="Head",["ArmL"]="Left Arm",["ArmR"]="Right Arm",
+		["LegL"]="Left Leg",["LegR"]="Right Leg",["BodyLeftArm"]="Left Arm",
+		["BodyRightArm"]="Right Arm",["BodyLeftLeg"]="Left Leg",
+		["BodyRightLeg"]="Right Leg",["BodyTorso"]="Torso",
+	}
+	for mName, cName in pairs(limbMap) do
+		if morphModel:FindFirstChild(mName) and character:FindFirstChild(cName) then
+			local obj = morphModel[mName]
+			if obj:FindFirstChild("Middle") then
+				local w = Instance.new("Weld")
+				w.Part0 = character[cName]; w.Part1 = obj.Middle
+				w.C0 = CFrame.new(0,0,0)
+				w:SetAttribute("MorphCategory", category)
+				w.Parent = w.Part0
+			end
+		end
+	end
+end
+
+local function applyPreviewMorph(character, category, meshName)
+	for _, v in pairs(character:GetDescendants()) do
+		if v:GetAttribute("MorphCategory") == category then v:Destroy() end
+	end
+
+	local limbs = getLimbs(character, category)
+
+	if meshName == "Default" then
+		for _, limb in pairs(limbs) do
+			if limb.Name ~= "HumanoidRootPart" then
+				TweenService:Create(limb, TS_FAST, {Transparency = 0}):Play()
+			end
+			for _, child in pairs(limb:GetChildren()) do
+				if child:IsA("Decal") or child:IsA("Texture") then
+					TweenService:Create(child, TS_FAST, {Transparency = 0}):Play()
+				end
+			end
+		end
+		return
+	end
+
+	local categoryFolder = morphsFolder:FindFirstChild(category)
+	if categoryFolder then
+		local selectedMorph = categoryFolder:FindFirstChild(meshName)
+		if selectedMorph then
+			for _, limb in pairs(limbs) do
+				limb.Transparency = 1
+				for _, child in pairs(limb:GetChildren()) do
+					if child:IsA("Decal") or child:IsA("Texture") then child.Transparency = 1 end
+				end
+			end
+
+			local morphClone = selectedMorph:Clone()
+			local skinTone   = getPlayerSkinTone(player.Character)
+
+			for _, desc in pairs(morphClone:GetDescendants()) do
+				if desc.Name:lower() == "color5" then
+					if desc:IsA("BasePart") then
+						desc.Color = skinTone
+					elseif desc:IsA("DataModelMesh") then
+						desc.VertexColor = Vector3.new(skinTone.R, skinTone.G, skinTone.B)
+					end
+				end
+			end
+
+			for _, child in pairs(morphClone:GetChildren()) do
+				child:SetAttribute("MorphCategory", category)
+			end
+
+			ApplyPositioningLogic(morphClone, character, category)
+
+			local fadeTweens = {}
+			local function prepareFade(obj)
+				if obj:IsA("BasePart") and obj.Transparency < 1 then
+					if obj.Name ~= "Middle" and not obj:FindFirstChild("Hidden") then
+						local t = obj.Transparency; obj.Transparency = 1
+						table.insert(fadeTweens, TweenService:Create(obj, TS_FAST, {Transparency = t}))
+					end
+				elseif (obj:IsA("Decal") or obj:IsA("Texture")) and obj.Transparency < 1 then
+					local t = obj.Transparency; obj.Transparency = 1
+					table.insert(fadeTweens, TweenService:Create(obj, TS_FAST, {Transparency = t}))
+				end
+			end
+
+			for _, item in pairs(morphClone:GetChildren()) do
+				prepareFade(item)
+				for _, desc in pairs(item:GetDescendants()) do prepareFade(desc) end
+				item.Parent = character
+			end
+
+			for _, tw in pairs(fadeTweens) do tw:Play() end
+			morphClone:Destroy()
+		end
+	end
+end
+
+local function setupDummy()
+	if dummy then dummy:Destroy() end
+	if not player:HasAppearanceLoaded() then player.CharacterAppearanceLoaded:Wait() end
+	task.wait(0.2)
+
+	currentAnimTrack = nil
+	originalC0s = {}
+
+	local char = player.Character
+	char.Archivable = true
+	dummy = char:Clone()
+
+	for _, v in pairs(dummy:GetDescendants()) do
+		if v:IsA("Script") or v:IsA("LocalScript") then
+			v:Destroy()
+		elseif v:IsA("BasePart") then
+			if v.Name == "HumanoidRootPart" or v.Transparency == 1 or v.Parent:IsA("Accessory") then
+				v.CanQuery = false
+			else
+				v.CanQuery = true
+			end
+		end
+		if v:IsA("Motor6D") and (
+			v.Name == "Left Shoulder" or v.Name == "Right Shoulder"
+				or v.Name == "RootJoint"  or v.Name == "Neck"
+			) then
+			originalC0s[v] = v.C0
+		end
+	end
+
+	dummy.Parent = worldModel
+	dummy:PivotTo(CFrame.new(0,0,0))
+
+	local humanoid = dummy:FindFirstChildWhichIsA("Humanoid")
+	if humanoid then
+		local animator = humanoid:FindFirstChildWhichIsA("Animator") or Instance.new("Animator", humanoid)
+		local kfs = morphsFolder:FindFirstChildWhichIsA("KeyframeSequence", true)
+		if kfs then
+			local ok, animId = pcall(function() return KeyframeSequenceProvider:RegisterKeyframeSequence(kfs) end)
+			if ok and animId then
+				local anim = Instance.new("Animation")
+				anim.AnimationId = animId
+				currentAnimTrack = animator:LoadAnimation(anim)
+				currentAnimTrack.Looped = true
+				if isAnimEnabled then currentAnimTrack:Play() end
+			end
+		end
+	end
+end
+
+setupDummy()
+
+-- ── Selection visuals ─────────────────────────────
+local function updateSelectionVisuals(selectedName)
+	local total = 0
+	for _ in pairs(pendingChanges) do total += 1 end
+	countLbl.Text = tostring(total)
+
+	for _, child in pairs(secScroll:GetChildren()) do
+		if child:IsA("TextButton") then
+			local s = child:FindFirstChildWhichIsA("UIStroke")
+			if child.Text == selectedName then
+				TweenService:Create(child, TS_FAST, {BackgroundColor3 = THEME.ItemActive, TextColor3 = THEME.Text}):Play()
+				if s then TweenService:Create(s, TS_FAST, {Color = THEME.Accent}):Play() end
+			else
+				TweenService:Create(child, TS_FAST, {BackgroundColor3 = THEME.ItemBg, TextColor3 = THEME.TextDim}):Play()
+				if s then TweenService:Create(s, TS_FAST, {Color = THEME.Stroke}):Play() end
+			end
+		end
+	end
+end
+
+-- ── Panel expand / collapse ───────────────────────
+local function setExpandedState(state, category)
+	if state then
+		rightTitleLbl.Text = categoryDisplayNames[category] or category:upper()
+
+		local function populateOptions()
+			for _, child in pairs(secScroll:GetChildren()) do
+				if child:IsA("GuiObject") then child:Destroy() end
+			end
+
+			local options = {"Default"}
+			local folder = morphsFolder:FindFirstChild(category)
+			if folder then
+				for _, mesh in pairs(folder:GetChildren()) do
+					table.insert(options, mesh.Name)
+				end
+			end
+
+			for idx, optName in ipairs(options) do
+				local btn = Instance.new("TextButton")
+				btn.Size = UDim2.new(1, -8, 0, 40)
+				btn.BackgroundColor3 = THEME.ItemBg
+				btn.Text = optName
+				btn.Font = Enum.Font.GothamBold
+				btn.TextColor3 = THEME.TextDim
+				btn.TextSize = 11
+				btn.ZIndex = 6
+				btn.Parent = secScroll
+				corner(btn, 8)
+				local s = stroke(btn, THEME.Stroke, 1)
+
+				btn.BackgroundTransparency = 1
+				btn.TextTransparency = 1
+				task.delay(idx * 0.03, function()
+					if btn and btn.Parent then
+						TweenService:Create(btn, TS_FAST, {BackgroundTransparency = 0}):Play()
+						TweenService:Create(btn, TS_FAST, {TextTransparency = 0}):Play()
+					end
+				end)
+
+				btn.MouseEnter:Connect(function()
+					if pendingChanges[category] ~= optName then
+						TweenService:Create(btn, TS_FAST, {BackgroundColor3 = THEME.ItemHover, TextColor3 = THEME.Text}):Play()
+						TweenService:Create(s, TS_FAST, {Color = THEME.StrokeHot}):Play()
+					end
+					applyPreviewMorph(dummy, category, optName)
+				end)
+				btn.MouseLeave:Connect(function()
+					local cur = pendingChanges[category] or "Default"
+					if cur ~= optName then
+						TweenService:Create(btn, TS_FAST, {BackgroundColor3 = THEME.ItemBg, TextColor3 = THEME.TextDim}):Play()
+						TweenService:Create(s, TS_FAST, {Color = THEME.Stroke}):Play()
+					end
+					applyPreviewMorph(dummy, category, cur)
+				end)
+				btn.Activated:Connect(function()
+					pendingChanges[category] = optName
+					applyPreviewMorph(dummy, category, optName)
+					updateSelectionVisuals(optName)
+				end)
+			end
+
+			updateSelectionVisuals(pendingChanges[category] or "Default")
+		end
+
+		local cb = catBtnMap[category]
+		if cb then setCatActive(cb) end
+
+		if isExpanded then
+			populateOptions()
+		else
+			if isTransitioning then return end
+			isTransitioning = true
+			isExpanded = true
+			populateOptions()
+			TweenService:Create(mainPanel, TS, {Size = UDim2.new(0, EXPAND_W, 0, PANEL_H)}):Play()
+			task.delay(0.08, function()
+				TweenService:Create(rightContainer, TS, {GroupTransparency = 0}):Play()
+			end)
+			task.delay(0.38, function() isTransitioning = false end)
+		end
+	else
+		if not isExpanded or isTransitioning then return end
+		isTransitioning = true
+		isExpanded = false
+		clearCatActive()
+		TweenService:Create(rightContainer, TS_FAST, {GroupTransparency = 1}):Play()
+		TweenService:Create(mainPanel, TS, {Size = UDim2.new(0, PANEL_W, 0, PANEL_H)}):Play()
+		task.delay(0.35, function() isTransitioning = false end)
+	end
+end
+
+-- ═══════════════════════════════════════════════════
+--  BUTTON EVENT CONNECTIONS
+-- ═══════════════════════════════════════════════════
+topBtn.MouseButton1Click:Connect(function() setExpandedState(true, "Top")    end)
+botBtn.MouseButton1Click:Connect(function() setExpandedState(true, "Bottom") end)
+dihBtn.MouseButton1Click:Connect(function() setExpandedState(true, "Dih")   end)
+puhBtn.MouseButton1Click:Connect(function() setExpandedState(true, "Puh")   end)
+closeBtn.MouseButton1Click:Connect(function() setExpandedState(false)         end)
+
+-- ── BarEvent: open/close panel from the BottomBar ────
+if toggleEvent then
+	toggleEvent.Event:Connect(function(state)
+		if state then
+			panelOpen = true
+			TweenService:Create(mainPanel, TS, {Position = UDim2.new(0.5, 0, 1, -120)}):Play()
+			TweenService:Create(blurEffect, TS, {Size = 10}):Play()
+		else
+			panelOpen = false
+			if isExpanded then setExpandedState(false) end
+			TweenService:Create(mainPanel, TS, {Position = UDim2.new(0.5, 0, 1, PANEL_H + 20)}):Play()
+			TweenService:Create(blurEffect, TS, {Size = 0}):Play()
+		end
+	end)
+end
+
+-- ═══════════════════════════════════════════════════
+--  VIEWPORT DRAG (rotate dummy)
+-- ═══════════════════════════════════════════════════
+vpf.InputBegan:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1
+		or input.UserInputType == Enum.UserInputType.Touch then
+		isDragging = true
+		dragMoved  = false
+		lastMousePos = Vector2.new(input.Position.X, input.Position.Y)
+	end
+end)
+
+zoomKnob.InputBegan:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1
+		or input.UserInputType == Enum.UserInputType.Touch then
+		isZoomDragging = true
+	end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseMovement
+		or input.UserInputType == Enum.UserInputType.Touch then
+		if isZoomDragging then
+			local trackStart = zoomTrack.AbsolutePosition.X
+			local trackWidth = zoomTrack.AbsoluteSize.X
+			local alpha = math.clamp((input.Position.X - trackStart) / trackWidth, 0, 1)
+			zoomKnob.Position = UDim2.new(alpha, -7, 0.5, -7)
+			zoomFill.Size     = UDim2.new(alpha, 0, 1, 0)
+			targetCameraDistance = 14 - (alpha * 9)
+		elseif isDragging then
+			local cur   = Vector2.new(input.Position.X, input.Position.Y)
+			local delta = cur - lastMousePos
+			if delta.Magnitude > 3 then dragMoved = true end
+			targetCamAngleX -= delta.X * 0.01
+			lastMousePos = cur
+		end
+	end
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1
+		or input.UserInputType == Enum.UserInputType.Touch then
+		isDragging     = false
+		isZoomDragging = false
+	end
+end)
+
+-- ═══════════════════════════════════════════════════
+--  VIEWPORT CLICK  (click body part to open category)
+-- ═══════════════════════════════════════════════════
+local function getCategory(partName)
+	if partName == "Torso"     then return "Torso"    end
+	if partName == "Left Arm"  then return "LeftArm"  end
+	if partName == "Right Arm" then return "RightArm" end
+	if partName == "Left Leg"  then return "LeftLeg"  end
+	if partName == "Right Leg" then return "RightLeg" end
+	return nil
+end
+
+local function triggerGlowFlash(part)
+	local glow = part:Clone()
+	glow.Name = "GlowShell"
+	for _, child in pairs(glow:GetChildren()) do
+		if child:IsA("SpecialMesh") or child:IsA("BlockMesh") or child:IsA("CylinderMesh") then
+			child.TextureId = ""
+		else
+			child:Destroy()
+		end
+	end
+	if glow:IsA("MeshPart") then glow.TextureID = "" end
+	glow.Size         = part.Size + Vector3.new(0.06, 0.06, 0.06)
+	glow.CFrame       = part.CFrame
+	glow.Material     = Enum.Material.Neon
+	glow.Color        = THEME.Accent
+	glow.Transparency = 0.2
+	glow.CanQuery     = false
+	glow.CanCollide   = false
+	glow.Anchored     = false
+	glow.Parent       = part.Parent
+	local wc = Instance.new("WeldConstraint")
+	wc.Part0 = part; wc.Part1 = glow; wc.Parent = glow
+	local fade = TweenService:Create(glow,
+		TweenInfo.new(0.45, Enum.EasingStyle.Quart, Enum.EasingDirection.Out),
+		{Transparency = 1, Size = part.Size}
+	)
+	fade:Play()
+	fade.Completed:Connect(function() glow:Destroy() end)
+end
+
+local function getViewportRay(viewportFrame, cam, inputPos)
+	local sz  = viewportFrame.AbsoluteSize
+	local lp  = inputPos - viewportFrame.AbsolutePosition
+	local nx  = (lp.X - sz.X/2) / (sz.X/2)
+	local ny  = (sz.Y/2 - lp.Y) / (sz.Y/2)
+	local fov = math.rad(cam.FieldOfView)
+	local tan = math.tan(fov/2)
+	local ar  = sz.X / sz.Y
+	local dir = cam.CFrame:VectorToWorldSpace(Vector3.new(nx*tan*ar, ny*tan, -1)).Unit
+	return cam.CFrame.Position, dir
+end
+
+vpf.InputEnded:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1
+		or input.UserInputType == Enum.UserInputType.Touch then
+		if not dragMoved then
+			local origin, dir = getViewportRay(vpf, camera, Vector2.new(input.Position.X, input.Position.Y))
+			local params = RaycastParams.new()
+			params.FilterType = Enum.RaycastFilterType.Include
+			params.FilterDescendantsInstances = {dummy}
+			local result = worldModel:Raycast(origin, dir * 1000, params)
+			if result and result.Instance then
+				local cat = getCategory(result.Instance.Name)
+				if cat then
+					triggerGlowFlash(result.Instance)
+					setExpandedState(true, cat)
+				else
+					setExpandedState(false)
+				end
+			else
+				setExpandedState(false)
+			end
+		end
+	end
+end)
+
+-- ═══════════════════════════════════════════════════
+--  APPLY BUTTON
+-- ═══════════════════════════════════════════════════
+applyBtn.MouseButton1Click:Connect(function()
+	applyLbl.Text = "APPLIED!"
+	local applyGrad = applyBtn:FindFirstChildWhichIsA("UIGradient")
+	if applyGrad then
+		applyGrad.Color = ColorSequence.new{
+			ColorSequenceKeypoint.new(0, THEME.Green),
+			ColorSequenceKeypoint.new(1, THEME.GreenDark),
+		}
+	end
+	remote:FireServer(pendingChanges)
+
+	task.delay(1.5, function()
+		if applyGrad then
+			applyGrad.Color = ColorSequence.new{
+				ColorSequenceKeypoint.new(0, THEME.Accent),
+				ColorSequenceKeypoint.new(1, THEME.AccentDark),
+			}
+		end
+		applyLbl.Text = "APPLY TO CHARACTER  →"
+		setExpandedState(false)
+		-- Tell the BottomBar to de-highlight the Avatar button
+		if toggleEvent then toggleEvent:Fire(false) end
+	end)
+end)
+
+-- ═══════════════════════════════════════════════════
+--  RENDER LOOP  (particles, camera, IK)
+-- ═══════════════════════════════════════════════════
+RunService.RenderStepped:Connect(function(dt)
+	panelBg.Rotation = (panelBg.Rotation + dt * 6) % 360
+
+	for _, p in ipairs(particles) do
+		p.y -= p.speed * dt
+		if p.y < -0.08 then
+			p.y     = 1.06
+			p.baseX = rng:NextNumber(0, 1)
+		end
+		local xOff = math.sin(tick() * p.freq + p.seed) * p.amp
+		p.gui.Position = UDim2.new(p.baseX + xOff, 0, p.y, 0)
+	end
+
+	local deltaCam = targetCamAngleX - currentCamAngleX
+	currentCamAngleX += deltaCam * math.min(dt * 14, 1)
+	currentCameraDistance += (targetCameraDistance - currentCameraDistance) * math.min(dt * 14, 1)
+
+	local swingTarget = isAnimEnabled and (deltaCam * SWING_INPUT_MULT) or 0
+	currentSwingAngle += (swingTarget - currentSwingAngle) * math.min(dt * SWING_SPEED, 1)
+
+	for motor, origC0 in pairs(originalC0s) do
+		if motor.Parent then
+			if motor.Name == "Left Shoulder" or motor.Name == "Right Shoulder" then
+				local isLeft = motor.Name:match("Left")
+				local sign   = isLeft and 1 or -1
+				local pitch  = currentSwingAngle * ARM_PITCH_MULT * sign
+				local roll   = math.abs(currentSwingAngle) * ARM_ROLL_MULT * (isLeft and -1 or 1)
+				motor.C0 = CFrame.new(origC0.Position)
+					* CFrame.Angles(pitch, 0, roll)
+					* (origC0 - origC0.Position)
+			elseif motor.Name == "RootJoint" then
+				local yawLag   = currentSwingAngle * TORSO_YAW_MULT
+				local rollLean = currentSwingAngle * TORSO_ROLL_MULT
+				motor.C0 = CFrame.new(origC0.Position)
+					* CFrame.Angles(0, yawLag, rollLean)
+					* (origC0 - origC0.Position)
+			elseif motor.Name == "Neck" then
+				local counterYaw = -currentSwingAngle * HEAD_COUNTER_YAW
+				motor.C0 = CFrame.new(origC0.Position)
+					* CFrame.Angles(0, counterYaw, 0)
+					* (origC0 - origC0.Position)
+			end
+		end
+	end
+
+	if dummy and dummy:FindFirstChild("HumanoidRootPart") then
+		local offset = CFrame.Angles(0, currentCamAngleX, 0) * CFrame.new(0, 0, currentCameraDistance)
+		camera.CFrame = CFrame.new(dummy.HumanoidRootPart.Position) * offset
+	end
+end)
+
+-- ═══════════════════════════════════════════════════
+--  CHARACTER RESPAWN
+-- ═══════════════════════════════════════════════════
+player.CharacterAdded:Connect(function()
+	task.wait(1)
+	setupDummy()
+	pendingChanges = {}
+	countLbl.Text = "0"
+end)
