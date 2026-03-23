@@ -1,0 +1,497 @@
+-- PhotoMode.lua (LocalScript)
+-- Requires FreecamController as a child ModuleScript
+
+local Players           = game:GetService("Players")
+local TweenService      = game:GetService("TweenService")
+local RunService        = game:GetService("RunService")
+local UserInputService  = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Lighting          = game:GetService("Lighting")
+
+local player = Players.LocalPlayer
+
+local FreecamController = require(ReplicatedStorage:WaitForChild("MODULES"):WaitForChild("FreecamController"))
+local fc = FreecamController.new(player)
+
+local BarEvents   = ReplicatedStorage:WaitForChild("BarEvents")
+local toggleEvent = BarEvents:WaitForChild("TogglePhotoMode")
+
+local T = {
+	Panel=Color3.fromRGB(19,11,11), PanelTop=Color3.fromRGB(27,16,16),
+	ItemBg=Color3.fromRGB(30,17,17), ItemHover=Color3.fromRGB(46,24,24),
+	ItemActive=Color3.fromRGB(90,18,18), Accent=Color3.fromRGB(255,58,58),
+	AccentBright=Color3.fromRGB(255,115,115), AccentDark=Color3.fromRGB(160,18,18),
+	AccentDeep=Color3.fromRGB(110,10,10), Text=Color3.fromRGB(255,255,255),
+	TextDim=Color3.fromRGB(185,150,150), TextMuted=Color3.fromRGB(108,70,70),
+	Stroke=Color3.fromRGB(58,30,30), StrokeHot=Color3.fromRGB(115,45,45),
+	Green=Color3.fromRGB(75,215,105), GreenDark=Color3.fromRGB(30,110,50),
+}
+
+local PANEL_W, PANEL_H = 340, 524
+local TS      = TweenInfo.new(0.38, Enum.EasingStyle.Quart, Enum.EasingDirection.Out)
+local TS_FAST = TweenInfo.new(0.15, Enum.EasingStyle.Quart, Enum.EasingDirection.Out)
+
+local function mk(cls, parent, props)
+	local i = Instance.new(cls)
+	if parent then i.Parent = parent end
+	if props then for k,v in pairs(props) do i[k]=v end end
+	return i
+end
+local function corner(p, r) return mk("UICorner",p,{CornerRadius=UDim.new(0,r or 8)}) end
+local function stroke(p, c, t) return mk("UIStroke",p,{Color=c or T.Stroke,Thickness=t or 1,ApplyStrokeMode=Enum.ApplyStrokeMode.Border}) end
+local function grad(p, c0, c1, r) return mk("UIGradient",p,{Color=ColorSequence.new{ColorSequenceKeypoint.new(0,c0),ColorSequenceKeypoint.new(1,c1)},Rotation=r or 90}) end
+
+-- Lighting effects
+local cc = Lighting:FindFirstChildOfClass("ColorCorrectionEffect")
+if not cc then cc = mk("ColorCorrectionEffect", Lighting, {Name="PhotoModeCC"}) end
+local depthBlur = Lighting:FindFirstChildOfClass("BlurEffect")
+if not depthBlur then depthBlur = mk("BlurEffect", Lighting, {Size=0, Name="PhotoModeBlur"}) end
+
+local savedCC = {
+	Brightness=cc.Brightness, Contrast=cc.Contrast,
+	Saturation=cc.Saturation, TintColor=cc.TintColor,
+}
+local savedLight = {
+	Brightness=Lighting.Brightness, ClockTime=Lighting.ClockTime,
+	FogEnd=Lighting.FogEnd, FogStart=Lighting.FogStart,
+}
+local savedBlurSize = depthBlur.Size
+
+-- Overlay ScreenGui
+local overlayGui = mk("ScreenGui", player:WaitForChild("PlayerGui"), {
+	Name="PhotoModeOverlay", ResetOnSpawn=false,
+	IgnoreGuiInset=true, ZIndexBehavior=Enum.ZIndexBehavior.Sibling, DisplayOrder=5,
+})
+
+local vigHost = mk("CanvasGroup", overlayGui, {
+	Size=UDim2.fromScale(1,1), BackgroundTransparency=1, GroupTransparency=1, ZIndex=1,
+})
+local function vigEdge(rot, sz, pos)
+	local f=mk("Frame",vigHost,{Size=sz,Position=pos,BackgroundColor3=Color3.new(0,0,0),ZIndex=1})
+	mk("UIGradient",f,{Transparency=NumberSequence.new{NumberSequenceKeypoint.new(0,0),NumberSequenceKeypoint.new(1,1)},Rotation=rot})
+end
+vigEdge(90,  UDim2.new(1,0,0.5,0),  UDim2.new(0,0,0,0))
+vigEdge(270, UDim2.new(1,0,0.5,0),  UDim2.new(0,0,0.5,0))
+vigEdge(0,   UDim2.new(0.32,0,1,0), UDim2.new(0,0,0,0))
+vigEdge(180, UDim2.new(0.32,0,1,0), UDim2.new(0.68,0,0,0))
+
+local grainHost = mk("CanvasGroup", overlayGui, {
+	Size=UDim2.fromScale(1,1), BackgroundTransparency=1, GroupTransparency=1, ZIndex=2,
+})
+local grainDots = {}
+local rngGrain  = Random.new()
+for i = 1, 60 do
+	local d = mk("Frame", grainHost, {
+		Size=UDim2.fromOffset(2,2), BackgroundColor3=Color3.new(1,1,1),
+		BackgroundTransparency=rngGrain:NextNumber(0.3,0.8), BorderSizePixel=0, ZIndex=2,
+	})
+	table.insert(grainDots, d)
+end
+
+local scanHost = mk("CanvasGroup", overlayGui, {
+	Size=UDim2.fromScale(1,1), BackgroundTransparency=1, GroupTransparency=1, ZIndex=3,
+})
+for i = 0, 119 do
+	mk("Frame", scanHost, {
+		Size=UDim2.new(1,0,0,1), Position=UDim2.new(0,0,i/120,0),
+		BackgroundColor3=Color3.new(0,0,0), BorderSizePixel=0, ZIndex=3,
+	})
+end
+
+local lbTop = mk("Frame", overlayGui, {Size=UDim2.new(1,0,0,0), BackgroundColor3=Color3.new(0,0,0), ZIndex=4})
+local lbBot = mk("Frame", overlayGui, {
+	Size=UDim2.new(1,0,0,0), Position=UDim2.new(0,0,1,0),
+	AnchorPoint=Vector2.new(0,1), BackgroundColor3=Color3.new(0,0,0), ZIndex=4,
+})
+
+local chromaHost = mk("CanvasGroup", overlayGui, {
+	Size=UDim2.fromScale(1,1), BackgroundTransparency=1, GroupTransparency=1, ZIndex=5,
+})
+local chromaR = mk("Frame", chromaHost, {Size=UDim2.fromScale(1,1), BackgroundColor3=Color3.new(1,0,0), BackgroundTransparency=0.92, ZIndex=5})
+local chromaB = mk("Frame", chromaHost, {Size=UDim2.fromScale(1,1), BackgroundColor3=Color3.new(0,0,1), BackgroundTransparency=0.92, ZIndex=5})
+mk("UIGradient", chromaR, {
+	Color=ColorSequence.new{ColorSequenceKeypoint.new(0,Color3.new(1,0,0)),ColorSequenceKeypoint.new(1,Color3.new(0,0,0))},
+	Transparency=NumberSequence.new{NumberSequenceKeypoint.new(0,0),NumberSequenceKeypoint.new(0.5,1),NumberSequenceKeypoint.new(1,1)},Rotation=0,
+})
+mk("UIGradient", chromaB, {
+	Color=ColorSequence.new{ColorSequenceKeypoint.new(0,Color3.new(0,0,0)),ColorSequenceKeypoint.new(1,Color3.new(0,0,1))},
+	Transparency=NumberSequence.new{NumberSequenceKeypoint.new(0,1),NumberSequenceKeypoint.new(0.5,1),NumberSequenceKeypoint.new(1,0)},Rotation=0,
+})
+
+-- Main panel
+local gui = mk("ScreenGui", player:WaitForChild("PlayerGui"), {
+	Name="PhotoModeGUI", ResetOnSpawn=false,
+	IgnoreGuiInset=true, ZIndexBehavior=Enum.ZIndexBehavior.Sibling, DisplayOrder=10,
+})
+
+local POS_CLOSED = UDim2.new(0.5, 0, 0, -(PANEL_H+20))
+local POS_OPEN   = UDim2.new(0.5, 0, 0, 8)
+
+local panel = mk("Frame", gui, {
+	Name="PhotoMode", Size=UDim2.new(0,PANEL_W,0,PANEL_H),
+	Position=POS_CLOSED, AnchorPoint=Vector2.new(0.5,0),
+	BackgroundColor3=T.Panel, ClipsDescendants=true, ZIndex=30,
+})
+corner(panel,14); stroke(panel,T.Stroke,1.5)
+
+local panelBg = mk("UIGradient", panel, {
+	Color=ColorSequence.new{
+		ColorSequenceKeypoint.new(0,    Color3.fromRGB(29,16,16)),
+		ColorSequenceKeypoint.new(0.55, Color3.fromRGB(18,10,10)),
+		ColorSequenceKeypoint.new(1,    Color3.fromRGB(11,6,6)),
+	},
+	Rotation=130,
+})
+
+local particles, rng = {}, Random.new()
+local pHost = mk("Frame", panel, {Size=UDim2.new(1,0,1,0), BackgroundTransparency=1, ZIndex=1})
+for i = 1, 8 do
+	local sz = rng:NextNumber(3,12)
+	local p  = mk("Frame", pHost, {
+		Size=UDim2.new(0,sz,0,sz), BackgroundColor3=(i%4==0) and T.AccentBright or T.Accent,
+		BackgroundTransparency=rng:NextNumber(0.91,0.97), BorderSizePixel=0, ZIndex=1,
+	})
+	corner(p,50)
+	table.insert(particles, {
+		gui=p, baseX=rng:NextNumber(0,1), y=rng:NextNumber(0,1),
+		speed=rng:NextNumber(0.012,0.048), amp=rng:NextNumber(0.01,0.035),
+		freq=rng:NextNumber(0.4,2.0), seed=rng:NextNumber(0,math.pi*2),
+	})
+end
+
+local titleBar = mk("Frame", panel, {Size=UDim2.new(1,0,0,46), BackgroundColor3=T.PanelTop, ZIndex=32})
+corner(titleBar,14)
+mk("Frame",titleBar,{Size=UDim2.new(1,0,0,16),Position=UDim2.new(0,0,1,-16),BackgroundColor3=T.PanelTop,ZIndex=32})
+local aline=mk("Frame",titleBar,{Size=UDim2.new(1,0,0,2),Position=UDim2.new(0,0,1,-1),BackgroundColor3=Color3.new(1,1,1),ZIndex=33})
+grad(aline,T.AccentDeep,T.Accent,0)
+local tdot=mk("Frame",titleBar,{Size=UDim2.new(0,7,0,7),Position=UDim2.new(0,14,0.5,-3),BackgroundColor3=T.Accent,ZIndex=34})
+corner(tdot,4); stroke(tdot,T.AccentBright,1)
+mk("TextLabel",titleBar,{
+	Size=UDim2.new(1,-32,1,0),Position=UDim2.new(0,28,0,0),
+	BackgroundTransparency=1,Text="PHOTO MODE",
+	TextColor3=T.Text,TextSize=11,Font=Enum.Font.GothamBlack,
+	TextXAlignment=Enum.TextXAlignment.Left,ZIndex=33,
+})
+
+local scroll = mk("ScrollingFrame", panel, {
+	Size=UDim2.new(1,-8,1,-52), Position=UDim2.new(0,4,0,48),
+	BackgroundTransparency=1, BorderSizePixel=0,
+	ScrollBarThickness=3, ScrollBarImageColor3=T.Accent,
+	VerticalScrollBarInset=Enum.ScrollBarInset.ScrollBar,
+	CanvasSize=UDim2.new(0,0,0,0), AutomaticCanvasSize=Enum.AutomaticSize.Y,
+	ZIndex=31,
+})
+mk("UIPadding",scroll,{PaddingTop=UDim.new(0,6),PaddingBottom=UDim.new(0,10),PaddingLeft=UDim.new(0,6),PaddingRight=UDim.new(0,6)})
+mk("UIListLayout",scroll,{Padding=UDim.new(0,5),HorizontalAlignment=Enum.HorizontalAlignment.Center,SortOrder=Enum.SortOrder.LayoutOrder})
+
+local dragging    = nil
+local sliderResets = {}
+
+UserInputService.InputChanged:Connect(function(inp)
+	if dragging and inp.UserInputType == Enum.UserInputType.MouseMovement then
+		local t = dragging.track
+		local a = math.clamp((inp.Position.X - t.AbsolutePosition.X) / t.AbsoluteSize.X, 0, 1)
+		dragging.set(a)
+	end
+end)
+UserInputService.InputEnded:Connect(function(inp)
+	if inp.UserInputType == Enum.UserInputType.MouseButton1 then dragging = nil end
+end)
+
+local function sec(label, order)
+	local f=mk("Frame",scroll,{Size=UDim2.new(1,0,0,22),BackgroundTransparency=1,ZIndex=32,LayoutOrder=order})
+	mk("TextLabel",f,{
+		Size=UDim2.new(1,0,1,0),BackgroundTransparency=1,Text=label,
+		TextColor3=T.TextMuted,TextSize=9,Font=Enum.Font.GothamBlack,
+		TextXAlignment=Enum.TextXAlignment.Left,ZIndex=33,
+	})
+	local sep=mk("Frame",f,{Size=UDim2.new(1,0,0,1),Position=UDim2.new(0,0,1,-1),BackgroundColor3=T.Stroke,ZIndex=33})
+	mk("Frame",sep,{Size=UDim2.new(0.38,0,1,0),BackgroundColor3=T.AccentDeep,ZIndex=34})
+end
+
+local function sld(label, minV, maxV, defV, fmt, order, onChange)
+	local row=mk("Frame",scroll,{Size=UDim2.new(1,0,0,52),BackgroundTransparency=1,ZIndex=32,LayoutOrder=order})
+
+	local header=mk("Frame",row,{Size=UDim2.new(1,0,0,16),BackgroundTransparency=1,ZIndex=32})
+	mk("TextLabel",header,{
+		Size=UDim2.new(1,-44,1,0),BackgroundTransparency=1,Text=label,
+		TextColor3=T.TextMuted,TextSize=8,Font=Enum.Font.GothamBold,
+		TextXAlignment=Enum.TextXAlignment.Left,ZIndex=33,
+		TextTransparency=0,
+	})
+	local vLbl=mk("TextLabel",header,{
+		Size=UDim2.new(0,42,1,0),Position=UDim2.new(1,-42,0,0),
+		BackgroundTransparency=1,Text=string.format(fmt,defV),
+		TextColor3=T.AccentBright,TextSize=9,Font=Enum.Font.GothamBlack,
+		TextXAlignment=Enum.TextXAlignment.Right,ZIndex=33,
+	})
+
+	-- Outer track shell
+	local shell=mk("Frame",row,{
+		Size=UDim2.new(1,0,0,28),Position=UDim2.new(0,0,0,20),
+		BackgroundColor3=Color3.fromRGB(7,3,3),ZIndex=32,
+	})
+	corner(shell,6)
+	mk("UIStroke",shell,{Color=Color3.fromRGB(40,18,18),Thickness=1,ApplyStrokeMode=Enum.ApplyStrokeMode.Border})
+
+	-- Rail (thin line inside shell)
+	local rail=mk("Frame",shell,{
+		Size=UDim2.new(1,-16,0,2),Position=UDim2.new(0,8,0.5,-1),
+		BackgroundColor3=Color3.fromRGB(45,18,18),ZIndex=33,
+	})
+	corner(rail,1)
+
+	-- Filled portion of rail
+	local defA=math.clamp((defV-minV)/(maxV-minV),0,1)
+	local railFill=mk("Frame",rail,{
+		Size=UDim2.new(defA,0,1,0),BackgroundColor3=T.Accent,ZIndex=34,
+	})
+	corner(railFill,1)
+	mk("UIGradient",railFill,{
+		Color=ColorSequence.new{
+			ColorSequenceKeypoint.new(0, T.AccentDeep),
+			ColorSequenceKeypoint.new(0.5, T.AccentDark),
+			ColorSequenceKeypoint.new(1, T.AccentBright),
+		},
+		Rotation=0,
+	})
+
+	-- Notch knob (vertical accent bar, no circle)
+	local notchGlow=mk("Frame",shell,{
+		Size=UDim2.new(0,10,1,-4),Position=UDim2.new(defA,-5,0,2),
+		BackgroundColor3=T.Accent,BackgroundTransparency=0.72,ZIndex=34,
+	})
+	corner(notchGlow,4)
+	local notch=mk("Frame",shell,{
+		Size=UDim2.new(0,4,1,-10),Position=UDim2.new(defA,-2,0,5),
+		BackgroundColor3=Color3.new(1,1,1),ZIndex=35,
+	})
+	corner(notch,2)
+	mk("UIGradient",notch,{
+		Color=ColorSequence.new{
+			ColorSequenceKeypoint.new(0, T.AccentBright),
+			ColorSequenceKeypoint.new(1, T.Accent),
+		},
+		Rotation=90,
+	})
+
+	-- Invisible full-size drag button over shell
+	local hitbox=mk("TextButton",shell,{
+		Size=UDim2.new(1,0,1,0),BackgroundTransparency=1,Text="",ZIndex=36,
+	})
+
+	local function setA(a)
+		a=math.clamp(a,0,1)
+		railFill.Size     = UDim2.new(a,0,1,0)
+		notchGlow.Position= UDim2.new(a,-5,0,2)
+		notch.Position    = UDim2.new(a,-2,0,5)
+		local v=minV+(maxV-minV)*a
+		vLbl.Text=string.format(fmt,v)
+		TweenService:Create(notch,TS_FAST,{BackgroundTransparency=0}):Play()
+		onChange(v)
+	end
+
+	hitbox.InputBegan:Connect(function(inp)
+		if inp.UserInputType==Enum.UserInputType.MouseButton1 then
+			local a=math.clamp((inp.Position.X-shell.AbsolutePosition.X)/shell.AbsoluteSize.X,0,1)
+			setA(a); dragging={track=shell,set=setA}
+			TweenService:Create(notchGlow,TS_FAST,{BackgroundTransparency=0.45}):Play()
+		end
+	end)
+	hitbox.InputEnded:Connect(function(inp)
+		if inp.UserInputType==Enum.UserInputType.MouseButton1 then
+			TweenService:Create(notchGlow,TS_FAST,{BackgroundTransparency=0.72}):Play()
+		end
+	end)
+	hitbox.MouseEnter:Connect(function()
+		TweenService:Create(notchGlow,TS_FAST,{BackgroundTransparency=0.55}):Play()
+		TweenService:Create(vLbl,TS_FAST,{TextColor3=T.Text}):Play()
+	end)
+	hitbox.MouseLeave:Connect(function()
+		TweenService:Create(notchGlow,TS_FAST,{BackgroundTransparency=0.72}):Play()
+		TweenService:Create(vLbl,TS_FAST,{TextColor3=T.AccentBright}):Play()
+	end)
+
+	table.insert(sliderResets, function() setA(defA) end)
+	return setA
+end
+
+local function tog(label, default, order, onChange)
+	local row=mk("Frame",scroll,{Size=UDim2.new(1,0,0,36),BackgroundColor3=T.ItemBg,ZIndex=32,LayoutOrder=order})
+	corner(row,8); stroke(row,T.Stroke,1)
+	mk("TextLabel",row,{
+		Size=UDim2.new(1,-58,1,0),Position=UDim2.new(0,10,0,0),
+		BackgroundTransparency=1,Text=label,
+		TextColor3=T.TextDim,TextSize=9,Font=Enum.Font.GothamBold,
+		TextXAlignment=Enum.TextXAlignment.Left,ZIndex=33,
+	})
+	local pill=mk("Frame",row,{Size=UDim2.new(0,44,0,22),Position=UDim2.new(1,-50,0.5,-11),BackgroundColor3=Color3.fromRGB(10,5,5),ZIndex=33})
+	corner(pill,11); stroke(pill,T.Stroke,1)
+	local knob=mk("Frame",pill,{Size=UDim2.new(0,18,0,18),Position=UDim2.new(0,2,0.5,-9),BackgroundColor3=T.TextMuted,ZIndex=34})
+	corner(knob,9)
+	local btn=mk("TextButton",row,{Size=UDim2.new(1,0,1,0),BackgroundTransparency=1,Text="",ZIndex=35})
+	local state=false
+	local function setOn(v)
+		state=v
+		TweenService:Create(knob,TS_FAST,{
+			Position=v and UDim2.new(1,-20,0.5,-9) or UDim2.new(0,2,0.5,-9),
+			BackgroundColor3=v and T.Accent or T.TextMuted,
+		}):Play()
+		TweenService:Create(pill,TS_FAST,{BackgroundColor3=v and T.AccentDeep or Color3.fromRGB(10,5,5)}):Play()
+		onChange(v)
+	end
+	btn.MouseButton1Click:Connect(function() setOn(not state) end)
+	if default then task.defer(function() setOn(true) end) end
+	table.insert(sliderResets, function() if state ~= default then setOn(default) end end)
+	return setOn
+end
+
+-- ── FREECAM ───────────────────────────────────────────────
+sec("FREECAM", 1)
+
+local fcContainer = mk("Frame", scroll, {
+	Size=UDim2.new(1,0,0,50), BackgroundTransparency=1, ZIndex=32, LayoutOrder=2,
+})
+local fcBtn = mk("TextButton", fcContainer, {
+	Size=UDim2.new(1,0,0,44), BackgroundColor3=T.ItemBg, Text="", ZIndex=33,
+})
+corner(fcBtn,10); local fcStr=stroke(fcBtn,T.Stroke,1.5); grad(fcBtn,T.AccentDeep,T.ItemBg,135)
+
+local fcDot=mk("Frame",fcBtn,{Size=UDim2.new(0,8,0,8),Position=UDim2.new(0,12,0.5,-4),BackgroundColor3=T.AccentDark,ZIndex=34})
+corner(fcDot,4)
+mk("TextLabel",fcBtn,{Size=UDim2.new(0,22,1,0),Position=UDim2.new(0,24,0,0),BackgroundTransparency=1,Text="◎",TextColor3=T.Accent,TextSize=16,Font=Enum.Font.GothamBlack,ZIndex=34})
+local fcLbl=mk("TextLabel",fcBtn,{Size=UDim2.new(1,-100,1,0),Position=UDim2.new(0,48,0,0),BackgroundTransparency=1,Text="ENABLE FREECAM",TextColor3=T.TextDim,TextSize=10,Font=Enum.Font.GothamBlack,TextXAlignment=Enum.TextXAlignment.Left,ZIndex=34})
+local fcStatus=mk("TextLabel",fcBtn,{Size=UDim2.new(0,48,1,0),Position=UDim2.new(1,-52,0,0),BackgroundTransparency=1,Text="OFF",TextColor3=T.TextMuted,TextSize=9,Font=Enum.Font.GothamBlack,TextXAlignment=Enum.TextXAlignment.Right,ZIndex=34})
+
+local function applyFreecamUI(active)
+	if active then
+		TweenService:Create(fcBtn,    TS_FAST,{BackgroundColor3=T.ItemActive}):Play()
+		TweenService:Create(fcStr,    TS_FAST,{Color=T.Accent}):Play()
+		TweenService:Create(fcLbl,    TS_FAST,{TextColor3=T.Text}):Play()
+		TweenService:Create(fcDot,    TS_FAST,{BackgroundColor3=T.AccentBright}):Play()
+		TweenService:Create(fcStatus, TS_FAST,{TextColor3=T.Green}):Play()
+		fcStatus.Text="ACTIVE"
+	else
+		TweenService:Create(fcBtn,    TS_FAST,{BackgroundColor3=T.ItemBg}):Play()
+		TweenService:Create(fcStr,    TS_FAST,{Color=T.Stroke}):Play()
+		TweenService:Create(fcLbl,    TS_FAST,{TextColor3=T.TextDim}):Play()
+		TweenService:Create(fcDot,    TS_FAST,{BackgroundColor3=T.AccentDark}):Play()
+		TweenService:Create(fcStatus, TS_FAST,{TextColor3=T.TextMuted}):Play()
+		fcStatus.Text="OFF"
+	end
+end
+
+fcBtn.MouseEnter:Connect(function()
+	if not fc:isActive() then
+		TweenService:Create(fcBtn,TS_FAST,{BackgroundColor3=T.ItemHover}):Play()
+		TweenService:Create(fcStr,TS_FAST,{Color=T.StrokeHot}):Play()
+	end
+end)
+fcBtn.MouseLeave:Connect(function()
+	if not fc:isActive() then
+		TweenService:Create(fcBtn,TS_FAST,{BackgroundColor3=T.ItemBg}):Play()
+		TweenService:Create(fcStr,TS_FAST,{Color=T.Stroke}):Play()
+	end
+end)
+fcBtn.MouseButton1Click:Connect(function()
+	if fc:isActive() then
+		fc:disable()
+	else
+		applyFreecamUI(true)
+		fc:enable(function() applyFreecamUI(false) end)
+	end
+end)
+
+local fcHint=mk("Frame",scroll,{Size=UDim2.new(1,0,0,24),BackgroundTransparency=1,ZIndex=32,LayoutOrder=3})
+mk("TextLabel",fcHint,{
+	Size=UDim2.new(1,0,1,0),BackgroundTransparency=1,
+	Text="All GUIs hide when active  ·  WASD fly  ·  Space/Ctrl up/down  ·  Q/E tilt  ·  Hold Z for controls",
+	TextColor3=T.TextMuted,TextSize=8,Font=Enum.Font.Gotham,
+	TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,ZIndex=33,
+})
+
+-- ── LIGHTING ──────────────────────────────────────────────
+sec("LIGHTING", 10)
+sld("BRIGHTNESS",  0,  3, Lighting.Brightness,"%.2f", 11, function(v) Lighting.Brightness=v end)
+sld("TIME OF DAY", 0, 24, Lighting.ClockTime, "%.1fh",12, function(v) Lighting.ClockTime=v end)
+sld("FOG DENSITY", 0,  1, 0,                  "%.2f", 13, function(v)
+	Lighting.FogEnd=v<0.01 and 100000 or (100+(1-v)*4900); Lighting.FogStart=0
+end)
+
+-- ── COLOR CORRECTION ──────────────────────────────────────
+sec("COLOR CORRECTION", 20)
+sld("SATURATION", -1,1, cc.Saturation, "%+.2f",21, function(v) cc.Saturation=v end)
+sld("CONTRAST",   -1,1, cc.Contrast,   "%+.2f",22, function(v) cc.Contrast=v end)
+sld("EXPOSURE",   -1,1, cc.Brightness, "%+.2f",23, function(v) cc.Brightness=v end)
+sld("TINT  R",     0,1, cc.TintColor.R,"%.2f", 24, function(v) cc.TintColor=Color3.new(v,cc.TintColor.G,cc.TintColor.B) end)
+sld("TINT  G",     0,1, cc.TintColor.G,"%.2f", 25, function(v) cc.TintColor=Color3.new(cc.TintColor.R,v,cc.TintColor.B) end)
+sld("TINT  B",     0,1, cc.TintColor.B,"%.2f", 26, function(v) cc.TintColor=Color3.new(cc.TintColor.R,cc.TintColor.G,v) end)
+
+-- ── OVERLAYS ──────────────────────────────────────────────
+sec("OVERLAYS", 30)
+local grainIntensity = 0
+sld("VIGNETTE",   0, 1,  0,"%.2f",31, function(v) TweenService:Create(vigHost,TS_FAST,{GroupTransparency=1-v}):Play() end)
+sld("FILM GRAIN", 0, 1,  0,"%.2f",32, function(v)
+	grainIntensity=v
+	TweenService:Create(grainHost,TS_FAST,{GroupTransparency=v<0.01 and 1 or 1-v*0.75}):Play()
+end)
+sld("DEPTH BLUR", 0,15,  0,"%.1f",33, function(v) depthBlur.Size=v end)
+sld("CHROMA",     0, 1,  0,"%.2f",34, function(v)
+	TweenService:Create(chromaHost,TS_FAST,{GroupTransparency=v<0.01 and 1 or 1-v*0.8}):Play()
+	chromaR.Position=UDim2.new(-v*0.008,0,0,0); chromaB.Position=UDim2.new(v*0.008,0,0,0)
+end)
+tog("SCAN LINES",false,35, function(v) TweenService:Create(scanHost,TS,{GroupTransparency=v and 0.88 or 1}):Play() end)
+tog("LETTERBOX", false,36, function(v)
+	TweenService:Create(lbTop,TS,{Size=UDim2.new(1,0,v and 0.09 or 0,0)}):Play()
+	TweenService:Create(lbBot,TS,{Size=UDim2.new(1,0,v and 0.09 or 0,0)}):Play()
+end)
+
+-- ── RESET ─────────────────────────────────────────────────
+sec("", 40)
+local resetBtn=mk("TextButton",scroll,{Size=UDim2.new(1,0,0,38),BackgroundColor3=Color3.fromRGB(13,6,6),Text="",ZIndex=32,LayoutOrder=41})
+corner(resetBtn,9); stroke(resetBtn,T.Stroke,1)
+local resetLbl=mk("TextLabel",resetBtn,{Size=UDim2.new(1,0,1,0),BackgroundTransparency=1,Text="RESET ALL",TextColor3=T.TextDim,TextSize=10,Font=Enum.Font.GothamBlack,ZIndex=33})
+resetBtn.MouseEnter:Connect(function() TweenService:Create(resetLbl,TS_FAST,{TextColor3=T.Text}):Play(); TweenService:Create(resetBtn,TS_FAST,{BackgroundColor3=T.ItemHover}):Play() end)
+resetBtn.MouseLeave:Connect(function() TweenService:Create(resetLbl,TS_FAST,{TextColor3=T.TextDim}):Play(); TweenService:Create(resetBtn,TS_FAST,{BackgroundColor3=Color3.fromRGB(13,6,6)}):Play() end)
+resetBtn.MouseButton1Click:Connect(function()
+	cc.Brightness=savedCC.Brightness; cc.Contrast=savedCC.Contrast
+	cc.Saturation=savedCC.Saturation; cc.TintColor=savedCC.TintColor
+	Lighting.Brightness=savedLight.Brightness; Lighting.ClockTime=savedLight.ClockTime
+	Lighting.FogEnd=savedLight.FogEnd; Lighting.FogStart=savedLight.FogStart
+	depthBlur.Size=savedBlurSize
+	vigHost.GroupTransparency=1; grainHost.GroupTransparency=1
+	scanHost.GroupTransparency=1; chromaHost.GroupTransparency=1
+	TweenService:Create(lbTop,TS,{Size=UDim2.new(1,0,0,0)}):Play()
+	TweenService:Create(lbBot,TS,{Size=UDim2.new(1,0,0,0)}):Play()
+	for _,fn in ipairs(sliderResets) do fn() end
+	resetLbl.Text="RESET ✓"; task.delay(1.5, function() resetLbl.Text="RESET ALL" end)
+end)
+
+-- Panel toggle
+task.spawn(function()
+	toggleEvent.Event:Connect(function(state)
+		TweenService:Create(panel, TS, {Position=state and POS_OPEN or POS_CLOSED}):Play()
+		if not state and fc:isActive() then fc:disable() end
+	end)
+end)
+
+-- Render loop
+local grainTimer = 0
+RunService.RenderStepped:Connect(function(dt)
+	panelBg.Rotation = (panelBg.Rotation + dt*5) % 360
+	for _, p in ipairs(particles) do
+		p.y -= p.speed * dt
+		if p.y < -0.1 then p.y=1.08; p.baseX=rng:NextNumber(0,1) end
+		p.gui.Position = UDim2.new(p.baseX + math.sin(tick()*p.freq+p.seed)*p.amp, 0, p.y, 0)
+	end
+	if grainIntensity > 0.01 then
+		grainTimer += dt
+		if grainTimer >= 0.05 then
+			grainTimer = 0
+			for _, d in ipairs(grainDots) do
+				d.Position = UDim2.new(rngGrain:NextNumber(0,1),0,rngGrain:NextNumber(0,1),0)
+				d.BackgroundTransparency = rngGrain:NextNumber(0.2,0.85)
+			end
+		end
+	end
+end)
