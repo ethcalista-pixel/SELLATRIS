@@ -1,0 +1,950 @@
+-- PoseEditor.lua  (LocalScript)
+
+local Players           = game:GetService("Players")
+local TweenService      = game:GetService("TweenService")
+local RunService        = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local player = Players.LocalPlayer
+
+local BarEvents   = ReplicatedStorage:WaitForChild("BarEvents", 10)
+local toggleEvent = BarEvents and BarEvents:WaitForChild("TogglePoseEditor", 10)
+
+local IKController = require(script:WaitForChild("IKController", 10))
+
+local function getOrMakeRemote(name)
+	local r = ReplicatedStorage:FindFirstChild(name)
+	if not r then r = Instance.new("RemoteEvent"); r.Name = name; r.Parent = ReplicatedStorage end
+	return r
+end
+local applyPoseRemote = getOrMakeRemote("ApplyPose")
+local anchorRemote    = getOrMakeRemote("SetPoseAnchor")
+
+-- ── Theme ─────────────────────────────────────────────────────────────────────
+local T = {
+	Panel        = Color3.fromRGB(19,  11, 11),
+	PanelTop     = Color3.fromRGB(27,  16, 16),
+	ItemBg       = Color3.fromRGB(30,  17, 17),
+	ItemHover    = Color3.fromRGB(46,  24, 24),
+	ItemActive   = Color3.fromRGB(90,  18, 18),
+	Accent       = Color3.fromRGB(255, 58,  58),
+	AccentBright = Color3.fromRGB(255, 115, 115),
+	AccentDark   = Color3.fromRGB(160, 18,  18),
+	AccentDeep   = Color3.fromRGB(110, 10,  10),
+	Text         = Color3.fromRGB(255, 255, 255),
+	TextDim      = Color3.fromRGB(185, 150, 150),
+	TextMuted    = Color3.fromRGB(108, 70,  70),
+	Stroke       = Color3.fromRGB(58,  30,  30),
+	StrokeHot    = Color3.fromRGB(115, 45,  45),
+	Green        = Color3.fromRGB(75,  215, 105),
+	GreenDark    = Color3.fromRGB(30,  110, 50),
+	Orange       = Color3.fromRGB(255, 160, 40),
+	OrangeDark   = Color3.fromRGB(160, 80,  10),
+	Blue         = Color3.fromRGB(80,  160, 255),
+	BlueDark     = Color3.fromRGB(30,  80,  160),
+}
+
+local PANEL_W   = 240
+local PANEL_H   = 430
+local PAD       = 12
+
+local TS      = TweenInfo.new(0.38, Enum.EasingStyle.Quart, Enum.EasingDirection.Out)
+local TS_FAST = TweenInfo.new(0.15, Enum.EasingStyle.Quart, Enum.EasingDirection.Out)
+
+-- ── Helpers ───────────────────────────────────────────────────────────────────
+local function mk(cls, parent, props)
+	local i = Instance.new(cls)
+	if parent then i.Parent = parent end
+	if props  then for k,v in pairs(props) do i[k] = v end end
+	return i
+end
+local function corner(p, r)
+	return mk("UICorner", p, {CornerRadius = UDim.new(0, r or 8)})
+end
+local function stroke(p, col, thick)
+	return mk("UIStroke", p, {Color=col or T.Stroke, Thickness=thick or 1,
+		ApplyStrokeMode=Enum.ApplyStrokeMode.Border})
+end
+local function grad(p, c0, c1, rot)
+	return mk("UIGradient", p, {
+		Color    = ColorSequence.new{ColorSequenceKeypoint.new(0,c0), ColorSequenceKeypoint.new(1,c1)},
+		Rotation = rot or 90,
+	})
+end
+local function makePill(parent, h)
+	local f = mk("Frame", parent, {
+		Size             = UDim2.new(1,0,0,h),
+		BackgroundColor3 = Color3.fromRGB(10,5,5), ZIndex=32,
+	})
+	corner(f,11); stroke(f,T.Stroke,1)
+	return f
+end
+local function pillSlider(parent)
+	local s = mk("Frame", parent, {
+		Size=UDim2.new(0.5,-2,1,-4), Position=UDim2.new(0,2,0,2),
+		BackgroundColor3=T.AccentDark, ZIndex=33,
+	})
+	corner(s,8); grad(s,T.Accent,T.AccentDark,90); return s
+end
+local function pillLabel(parent, txt, side)
+	return mk("TextLabel", parent, {
+		Size             = UDim2.new(0.5,0,1,0),
+		Position         = side=="right" and UDim2.new(0.5,0,0,0) or UDim2.new(0,0,0,0),
+		BackgroundTransparency=1, Text=txt,
+		TextColor3       = side=="right" and T.TextMuted or T.Text,
+		TextSize=9, Font=Enum.Font.GothamBlack, ZIndex=34,
+	})
+end
+
+-- ── ScreenGui ─────────────────────────────────────────────────────────────────
+local gui = mk("ScreenGui", player:WaitForChild("PlayerGui"), {
+	Name="PoseEditorGUI", ResetOnSpawn=false,
+	ZIndexBehavior=Enum.ZIndexBehavior.Sibling, IgnoreGuiInset=true,
+})
+
+local POS_CLOSED = UDim2.new(0, -(PANEL_W+20), 0.5, -PANEL_H/2)
+local POS_OPEN   = UDim2.new(0, 8,             0.5, -PANEL_H/2)
+
+local panel = mk("Frame", gui, {
+	Name="PoseEditor", Size=UDim2.new(0,PANEL_W,0,PANEL_H),
+	Position=POS_CLOSED, BackgroundColor3=T.Panel,
+	ClipsDescendants=true, ZIndex=30,
+})
+corner(panel,14); stroke(panel,T.Stroke,1.5)
+grad(mk("UIGradient",panel), Color3.fromRGB(29,16,16), Color3.fromRGB(11,6,6), 130)
+
+-- Particles
+local pHost = mk("Frame", panel, {Size=UDim2.new(1,0,1,0), BackgroundTransparency=1, ZIndex=1})
+local particles, rng = {}, Random.new()
+for i = 1, 8 do
+	local sz = rng:NextNumber(3,12)
+	local p  = mk("Frame", pHost, {
+		Size=UDim2.new(0,sz,0,sz), BackgroundColor3=(i%4==0) and T.AccentBright or T.Accent,
+		BackgroundTransparency=rng:NextNumber(0.91,0.97), BorderSizePixel=0, ZIndex=1,
+	})
+	corner(p,50)
+	table.insert(particles, {gui=p, baseX=rng:NextNumber(0,1), y=rng:NextNumber(0,1),
+		speed=rng:NextNumber(0.012,0.048), amp=rng:NextNumber(0.01,0.035),
+		freq=rng:NextNumber(0.4,2.0), seed=rng:NextNumber(0,math.pi*2)})
+end
+
+-- ── Title bar ─────────────────────────────────────────────────────────────────
+local titleBar = mk("Frame", panel, {Size=UDim2.new(1,0,0,46), BackgroundColor3=T.PanelTop, ZIndex=32})
+corner(titleBar,14)
+mk("Frame", titleBar, {Size=UDim2.new(1,0,0,16), Position=UDim2.new(0,0,1,-16), BackgroundColor3=T.PanelTop, ZIndex=32})
+local aline = mk("Frame", titleBar, {Size=UDim2.new(1,0,0,2), Position=UDim2.new(0,0,1,-1), BackgroundColor3=Color3.new(1,1,1), ZIndex=33})
+grad(aline, T.AccentDeep, T.Accent, 0)
+local tdot = mk("Frame", titleBar, {Size=UDim2.new(0,7,0,7), Position=UDim2.new(0,14,0.5,-3), BackgroundColor3=T.Accent, ZIndex=34})
+corner(tdot,4); stroke(tdot,T.AccentBright,1)
+mk("TextLabel", titleBar, {
+	Size=UDim2.new(1,-32,1,0), Position=UDim2.new(0,28,0,0),
+	BackgroundTransparency=1, Text="POSE EDITOR",
+	TextColor3=T.Text, TextSize=11, Font=Enum.Font.GothamBlack,
+	TextXAlignment=Enum.TextXAlignment.Left, ZIndex=33,
+})
+
+-- ── Static / Dynamic pill ─────────────────────────────────────────────────────
+local modePill    = makePill(panel, 28)
+modePill.Position = UDim2.new(0,PAD,0,50); modePill.Size = UDim2.new(1,-PAD*2,0,28)
+local modeSlide   = pillSlider(modePill)
+local modeStatLbl = pillLabel(modePill, "STATIC",  "left")
+local modeDynLbl  = pillLabel(modePill, "DYNAMIC", "right")
+local modePillBtn = mk("TextButton", modePill, {Size=UDim2.new(1,0,1,0), BackgroundTransparency=1, Text="", ZIndex=35})
+local currentMode = "Static"
+
+-- ── Content containers ────────────────────────────────────────────────────────
+local CONTENT_Y = 84
+
+local staticContent = mk("Frame", panel, {
+	Size=UDim2.new(1,-PAD*2,0,PANEL_H-CONTENT_Y-PAD),
+	Position=UDim2.new(0,PAD,0,CONTENT_Y),
+	BackgroundTransparency=1, ZIndex=31, ClipsDescendants=false,
+})
+mk("UIListLayout", staticContent, {
+	Padding=UDim.new(0,8), SortOrder=Enum.SortOrder.LayoutOrder,
+	HorizontalAlignment=Enum.HorizontalAlignment.Center,
+})
+
+local dynamicContent = mk("Frame", panel, {
+	Size=UDim2.new(1,-PAD*2,0,PANEL_H-CONTENT_Y-PAD),
+	Position=UDim2.new(0,PAD,0,CONTENT_Y),
+	BackgroundTransparency=1, ZIndex=31, Visible=false,
+})
+mk("UIListLayout", dynamicContent, {
+	Padding=UDim.new(0,8), SortOrder=Enum.SortOrder.LayoutOrder,
+	HorizontalAlignment=Enum.HorizontalAlignment.Center,
+})
+
+-- ── Limb definitions ──────────────────────────────────────────────────────────
+local LIMBS_DEF = {
+	{ name="Head",      label="HEAD",  joint="Neck",           parent="Torso",            dotCol=Color3.fromRGB(255,210,100), order=1 },
+	{ name="Left Arm",  label="L ARM", joint="Left Shoulder",  parent="Torso",            dotCol=Color3.fromRGB(100,255,150), order=2 },
+	{ name="Right Arm", label="R ARM", joint="Right Shoulder", parent="Torso",            dotCol=Color3.fromRGB(100,255,150), order=3 },
+	{ name="Torso",     label="TORSO", joint="RootJoint",      parent="HumanoidRootPart", dotCol=Color3.fromRGB(100,180,255), order=4 },
+	{ name="Left Leg",  label="L LEG", joint="Left Hip",       parent="Torso",            dotCol=Color3.fromRGB(255,120,200), order=5 },
+	{ name="Right Leg", label="R LEG", joint="Right Hip",      parent="Torso",            dotCol=Color3.fromRGB(255,120,200), order=6 },
+}
+
+local vpPreviews = {}
+
+-- ── [1] Limb grid ─────────────────────────────────────────────────────────────
+local CELL_W = 68; local CELL_H = 48
+local GRID_ROWS = 2; local GRID_COLS = 3; local GRID_GAP = 5
+local GRID_H = GRID_ROWS * CELL_H + (GRID_ROWS-1) * GRID_GAP
+
+local limbGrid = mk("Frame", staticContent, {
+	Size=UDim2.new(1,0,0,GRID_H), BackgroundTransparency=1, ZIndex=31, LayoutOrder=1,
+})
+mk("UIGridLayout", limbGrid, {
+	CellSize    = UDim2.new(0,CELL_W,0,CELL_H),
+	CellPadding = UDim2.new(0,GRID_GAP,0,GRID_GAP),
+	SortOrder   = Enum.SortOrder.LayoutOrder,
+	HorizontalAlignment = Enum.HorizontalAlignment.Center,
+	VerticalAlignment   = Enum.VerticalAlignment.Center,
+})
+
+-- ── [2] Selected limb card ────────────────────────────────────────────────────
+local selCard = mk("Frame", staticContent, {
+	Size=UDim2.new(1,0,0,34), BackgroundColor3=Color3.fromRGB(13,7,7), ZIndex=32, LayoutOrder=2,
+})
+corner(selCard,8); stroke(selCard,T.Stroke,1)
+local selDot = mk("Frame", selCard, {
+	Size=UDim2.new(0,6,0,6), Position=UDim2.new(0,10,0.5,-3),
+	BackgroundColor3=T.TextMuted, ZIndex=33,
+})
+corner(selDot,3)
+local selLbl = mk("TextLabel", selCard, {
+	Size=UDim2.new(1,-22,0,14), Position=UDim2.new(0,22,0.5,-7),
+	BackgroundTransparency=1, Text="NONE",
+	TextColor3=T.TextMuted, TextSize=10, Font=Enum.Font.GothamBlack,
+	TextXAlignment=Enum.TextXAlignment.Left,
+	TextTruncate=Enum.TextTruncate.AtEnd, ZIndex=33,
+})
+
+-- ── [3] Rotate / Move pill ────────────────────────────────────────────────────
+local hmPill   = makePill(staticContent, 32)
+hmPill.LayoutOrder = 3
+local hmSlide  = pillSlider(hmPill)
+local hmRotLbl = pillLabel(hmPill, "ROTATE", "left")
+local hmMovLbl = pillLabel(hmPill, "MOVE",   "right")
+local hmBtn    = mk("TextButton", hmPill, {Size=UDim2.new(1,0,1,0), BackgroundTransparency=1, Text="", ZIndex=35})
+
+-- ── [4] Anchor banner ─────────────────────────────────────────────────────────
+local anchorBanner = mk("Frame", staticContent, {
+	Size=UDim2.new(1,0,0,36), BackgroundColor3=Color3.fromRGB(75,35,8), ZIndex=32, LayoutOrder=4,
+})
+corner(anchorBanner,8); stroke(anchorBanner,T.Orange,1)
+local anchorDot = mk("Frame", anchorBanner, {
+	Size=UDim2.new(0,6,0,6), Position=UDim2.new(0,10,0.5,-3),
+	BackgroundColor3=T.Orange, ZIndex=33,
+})
+corner(anchorDot,3)
+local anchorLbl = mk("TextLabel", anchorBanner, {
+	Size=UDim2.new(1,-80,1,0), Position=UDim2.new(0,22,0,0),
+	BackgroundTransparency=1, Text="ANCHORED",
+	TextColor3=T.Orange, TextSize=10, Font=Enum.Font.GothamBlack,
+	TextXAlignment=Enum.TextXAlignment.Left, ZIndex=33,
+})
+local unanchorBtn = mk("TextButton", anchorBanner, {
+	Size=UDim2.new(0,66,1,-8), Position=UDim2.new(1,-70,0,4),
+	BackgroundColor3=T.OrangeDark, Text="", ZIndex=34,
+})
+corner(unanchorBtn,6); stroke(unanchorBtn,T.Orange,1)
+mk("TextLabel", unanchorBtn, {
+	Size=UDim2.new(1,0,1,0), BackgroundTransparency=1,
+	Text="RELEASE", TextColor3=T.Text, TextSize=9,
+	Font=Enum.Font.GothamBlack, ZIndex=35,
+})
+
+-- ── [5] Apply button ──────────────────────────────────────────────────────────
+local applyBtn = mk("TextButton", staticContent, {
+	Size=UDim2.new(1,0,0,42), BackgroundColor3=Color3.new(1,1,1), Text="", ZIndex=31, LayoutOrder=5,
+})
+corner(applyBtn,9); stroke(applyBtn,T.AccentDark,1); grad(applyBtn,T.Accent,T.AccentDark)
+local applyLbl = mk("TextLabel", applyBtn, {
+	Size=UDim2.new(1,0,1,0), BackgroundTransparency=1,
+	Text="APPLY POSE TO CHARACTER", TextColor3=T.Text,
+	TextSize=10, Font=Enum.Font.GothamBlack, ZIndex=32,
+})
+
+-- ── [6] Reset button ──────────────────────────────────────────────────────────
+local resetBtn = mk("TextButton", staticContent, {
+	Size=UDim2.new(1,0,0,36), BackgroundColor3=Color3.fromRGB(13,6,6), Text="", ZIndex=31, LayoutOrder=6,
+})
+corner(resetBtn,9); stroke(resetBtn,T.Stroke,1)
+local resetLbl = mk("TextLabel", resetBtn, {
+	Size=UDim2.new(1,0,1,0), BackgroundTransparency=1,
+	Text="RESET ALL", TextColor3=T.TextDim,
+	TextSize=10, Font=Enum.Font.GothamBlack, ZIndex=32,
+})
+resetBtn.MouseEnter:Connect(function()
+	TweenService:Create(resetLbl,TS_FAST,{TextColor3=T.Text}):Play()
+	TweenService:Create(resetBtn,TS_FAST,{BackgroundColor3=T.ItemHover}):Play()
+end)
+resetBtn.MouseLeave:Connect(function()
+	TweenService:Create(resetLbl,TS_FAST,{TextColor3=T.TextDim}):Play()
+	TweenService:Create(resetBtn,TS_FAST,{BackgroundColor3=Color3.fromRGB(13,6,6)}):Play()
+end)
+
+-- ═══════════════════════════════════════════════════════════════════════════
+--  DYNAMIC IK CONTENT
+-- ═══════════════════════════════════════════════════════════════════════════
+
+-- IK controller — created after gui exists so it can parent Handles/SelectionBoxes
+local ikController   = IKController.new(player, gui)
+local ikBtnUpdateFns = {}   -- [limbName] = function() refresh row visuals
+
+-- ── Header label ─────────────────────────────────────────────────────────────
+mk("TextLabel", dynamicContent, {
+	Size=UDim2.new(1,0,0,18), BackgroundTransparency=1,
+	Text="IK TARGETS", TextColor3=T.TextMuted, TextSize=9,
+	Font=Enum.Font.GothamBlack, TextXAlignment=Enum.TextXAlignment.Left,
+	ZIndex=32, LayoutOrder=1,
+})
+
+-- ── Arm IK rows ───────────────────────────────────────────────────────────────
+local IK_ARM_DEFS = {
+	{ name="Left Arm",  label="LEFT ARM",  dotCol=Color3.fromRGB(100,255,150), order=2 },
+	{ name="Right Arm", label="RIGHT ARM", dotCol=Color3.fromRGB(100,200,255), order=3 },
+}
+
+for _, armDef in ipairs(IK_ARM_DEFS) do
+	local row = mk("Frame", dynamicContent, {
+		Size=UDim2.new(1,0,0,46), BackgroundColor3=T.ItemBg, ZIndex=32, LayoutOrder=armDef.order,
+	})
+	corner(row,9)
+	local rowStroke = stroke(row, T.Stroke, 1)
+
+	local dot = mk("Frame", row, {
+		Size=UDim2.new(0,6,0,6), Position=UDim2.new(0,10,0.5,-3),
+		BackgroundColor3=armDef.dotCol, ZIndex=33,
+	})
+	corner(dot,3)
+
+	local lbl = mk("TextLabel", row, {
+		Size=UDim2.new(0,76,0,14), Position=UDim2.new(0,22,0,10),
+		BackgroundTransparency=1, Text=armDef.label,
+		TextColor3=T.TextDim, TextSize=9, Font=Enum.Font.GothamBlack,
+		TextXAlignment=Enum.TextXAlignment.Left, ZIndex=33,
+	})
+
+	mk("TextLabel", row, {
+		Size=UDim2.new(0,100,0,11), Position=UDim2.new(0,22,0,26),
+		BackgroundTransparency=1, Text="drag handle in world",
+		TextColor3=T.TextMuted, TextSize=7, Font=Enum.Font.Gotham,
+		TextXAlignment=Enum.TextXAlignment.Left, ZIndex=33,
+	})
+
+	local toggleBtn = mk("TextButton", row, {
+		Size=UDim2.new(0,72,0,28), Position=UDim2.new(1,-76,0.5,-14),
+		BackgroundColor3=T.ItemBg, Text="ENABLE",
+		TextColor3=T.TextMuted, TextSize=8, Font=Enum.Font.GothamBlack,
+		ZIndex=33,
+	})
+	corner(toggleBtn,7)
+	local tStroke = stroke(toggleBtn, T.Stroke, 1)
+
+	toggleBtn.MouseEnter:Connect(function()
+		if not ikController:isActive(armDef.name) then
+			TweenService:Create(toggleBtn, TS_FAST, {BackgroundColor3=T.ItemHover, TextColor3=T.TextDim}):Play()
+		end
+	end)
+	toggleBtn.MouseLeave:Connect(function()
+		if not ikController:isActive(armDef.name) then
+			TweenService:Create(toggleBtn, TS_FAST, {BackgroundColor3=T.ItemBg, TextColor3=T.TextMuted}):Play()
+		end
+	end)
+
+	local function refreshVisual()
+		if ikController:isActive(armDef.name) then
+			TweenService:Create(toggleBtn,  TS_FAST, {BackgroundColor3=T.ItemActive, TextColor3=T.Text}):Play()
+			TweenService:Create(tStroke,    TS_FAST, {Color=T.Accent}):Play()
+			TweenService:Create(rowStroke,  TS_FAST, {Color=T.Accent}):Play()
+			TweenService:Create(lbl,        TS_FAST, {TextColor3=T.AccentBright}):Play()
+			toggleBtn.Text = "ACTIVE"
+		else
+			TweenService:Create(toggleBtn,  TS_FAST, {BackgroundColor3=T.ItemBg, TextColor3=T.TextMuted}):Play()
+			TweenService:Create(tStroke,    TS_FAST, {Color=T.Stroke}):Play()
+			TweenService:Create(rowStroke,  TS_FAST, {Color=T.Stroke}):Play()
+			TweenService:Create(lbl,        TS_FAST, {TextColor3=T.TextDim}):Play()
+			toggleBtn.Text = "ENABLE"
+		end
+	end
+	ikBtnUpdateFns[armDef.name] = refreshVisual
+
+	local captured = armDef
+	toggleBtn.MouseButton1Click:Connect(function()
+		if ikController:isActive(captured.name) then
+			ikController:disable(captured.name)
+		else
+			ikController:enable(captured.name)
+		end
+		refreshVisual()
+	end)
+end
+
+-- ── Hint text ─────────────────────────────────────────────────────────────────
+mk("TextLabel", dynamicContent, {
+	Size=UDim2.new(1,0,0,44), BackgroundTransparency=1,
+	Text="Enable IK on an arm, then drag the red handle that appears near the hand in the world.",
+	TextColor3=T.TextMuted, TextSize=7.5, Font=Enum.Font.Gotham,
+	TextWrapped=true, TextXAlignment=Enum.TextXAlignment.Left,
+	ZIndex=32, LayoutOrder=4,
+})
+
+-- ── Dynamic apply/reset buttons ───────────────────────────────────────────────
+local dynApplyBtn = mk("TextButton", dynamicContent, {
+	Size=UDim2.new(1,0,0,40), BackgroundColor3=Color3.new(1,1,1), Text="", ZIndex=31, LayoutOrder=5,
+})
+corner(dynApplyBtn,9); stroke(dynApplyBtn,T.AccentDark,1); grad(dynApplyBtn,T.Accent,T.AccentDark)
+local dynApplyLbl = mk("TextLabel", dynApplyBtn, {
+	Size=UDim2.new(1,0,1,0), BackgroundTransparency=1,
+	Text="APPLY POSE TO CHARACTER", TextColor3=T.Text,
+	TextSize=10, Font=Enum.Font.GothamBlack, ZIndex=32,
+})
+
+local dynResetBtn = mk("TextButton", dynamicContent, {
+	Size=UDim2.new(1,0,0,34), BackgroundColor3=Color3.fromRGB(13,6,6), Text="", ZIndex=31, LayoutOrder=6,
+})
+corner(dynResetBtn,9); stroke(dynResetBtn,T.Stroke,1)
+local dynResetLbl = mk("TextLabel", dynResetBtn, {
+	Size=UDim2.new(1,0,1,0), BackgroundTransparency=1,
+	Text="RESET IK", TextColor3=T.TextDim,
+	TextSize=10, Font=Enum.Font.GothamBlack, ZIndex=32,
+})
+dynResetBtn.MouseEnter:Connect(function()
+	TweenService:Create(dynResetLbl, TS_FAST, {TextColor3=T.Text}):Play()
+	TweenService:Create(dynResetBtn, TS_FAST, {BackgroundColor3=T.ItemHover}):Play()
+end)
+dynResetBtn.MouseLeave:Connect(function()
+	TweenService:Create(dynResetLbl, TS_FAST, {TextColor3=T.TextDim}):Play()
+	TweenService:Create(dynResetBtn, TS_FAST, {BackgroundColor3=Color3.fromRGB(13,6,6)}):Play()
+end)
+
+staticContent.Visible  = true
+dynamicContent.Visible = false
+
+-- ═══════════════════════════════════════════════════════════════════════════
+--  STATE
+-- ═══════════════════════════════════════════════════════════════════════════
+local poseData        = {}
+local originalC0s     = {}
+local selectedLimb    = nil
+local selectedLimbBtn = nil
+local limbBtnMap      = {}
+local currentArcH     = nil
+local currentMovH     = nil
+local currentSelBox   = nil
+local isAnchored      = false
+local handleMode      = "Rotate"
+
+-- ── Helpers ───────────────────────────────────────────────────────────────────
+local function cacheOriginals()
+	local char = player.Character; if not char then return end
+	originalC0s = {}
+	for _, ld in ipairs(LIMBS_DEF) do
+		local pp = char:FindFirstChild(ld.parent)
+		if pp then
+			local m = pp:FindFirstChild(ld.joint)
+			if m and m:IsA("Motor6D") then originalC0s[ld.name] = m.C0 end
+		end
+	end
+end
+
+local function getMotor(limbName)
+	local char = player.Character; if not char then return nil end
+	for _, ld in ipairs(LIMBS_DEF) do
+		if ld.name == limbName then
+			local pp = char:FindFirstChild(ld.parent)
+			if pp then
+				local m = pp:FindFirstChild(ld.joint)
+				if m and m:IsA("Motor6D") then return m end
+			end
+		end
+	end
+end
+
+local function getAdornPart(limbName)
+	local char = player.Character; if not char then return nil end
+	if limbName == "Torso" then
+		return char:FindFirstChild("HumanoidRootPart") or char:FindFirstChild("Torso")
+	end
+	return char:FindFirstChild(limbName)
+end
+
+local function getPart1(limbName)
+	local char = player.Character; if not char then return nil end
+	if limbName == "Torso" then return char:FindFirstChild("Torso") end
+	return char:FindFirstChild(limbName)
+end
+
+-- ── Animations ────────────────────────────────────────────────────────────────
+local function setAnimationsEnabled(enabled)
+	local char = player.Character; if not char then return end
+	local hum  = char:FindFirstChildWhichIsA("Humanoid"); if not hum then return end
+	local anim = char:FindFirstChild("Animate")
+	if anim then anim.Disabled = not enabled end
+	local animator = hum:FindFirstChildWhichIsA("Animator")
+	if animator then
+		for _, t in ipairs(animator:GetPlayingAnimationTracks()) do t:Stop(0) end
+	end
+end
+
+-- ── Anchor ────────────────────────────────────────────────────────────────────
+local function setAnchored(state)
+	isAnchored = state
+	anchorRemote:FireServer(state)
+	if state then
+		setAnimationsEnabled(false)
+		TweenService:Create(anchorBanner, TS_FAST, {BackgroundColor3=Color3.fromRGB(75,35,8)}):Play()
+		TweenService:Create(anchorLbl,    TS_FAST, {TextColor3=T.Orange}):Play()
+		anchorLbl.Text = "ANCHORED"
+	else
+		setAnimationsEnabled(true)
+		TweenService:Create(anchorBanner, TS_FAST, {BackgroundColor3=Color3.fromRGB(18,32,14)}):Play()
+		TweenService:Create(anchorLbl,    TS_FAST, {TextColor3=T.Green}):Play()
+		anchorLbl.Text = "RELEASED"
+		task.delay(1.5, function()
+			anchorLbl.Text = "ANCHORED"
+			TweenService:Create(anchorBanner, TS_FAST, {BackgroundColor3=Color3.fromRGB(75,35,8)}):Play()
+			TweenService:Create(anchorLbl,    TS_FAST, {TextColor3=T.Orange}):Play()
+		end)
+	end
+end
+
+unanchorBtn.MouseButton1Click:Connect(function() setAnchored(false) end)
+
+-- ═══════════════════════════════════════════════════════════════════════════
+--  STATIC HANDLES
+-- ═══════════════════════════════════════════════════════════════════════════
+function destroyHandles()
+	if currentArcH   then currentArcH:Destroy();   currentArcH   = nil end
+	if currentMovH   then currentMovH:Destroy();   currentMovH   = nil end
+	if currentSelBox then currentSelBox:Destroy(); currentSelBox = nil end
+end
+
+local function spawnHandles(limbName)
+	destroyHandles()
+	if not limbName then return end
+
+	local adorn = getAdornPart(limbName)
+	local part1 = getPart1(limbName)
+	local motor = getMotor(limbName)
+	if not adorn or not part1 or not motor then return end
+
+	local sb = mk("SelectionBox", gui, {
+		Adornee=adorn, Color3=T.Accent,
+		LineThickness=0.04, SurfaceTransparency=0.85, SurfaceColor3=T.Accent,
+	})
+	currentSelBox = sb
+
+	if handleMode == "Rotate" then
+		local ah = mk("ArcHandles", gui, {
+			Adornee = adorn,
+			Axes    = Axes.new(Enum.Axis.X, Enum.Axis.Y, Enum.Axis.Z),
+		})
+		currentArcH = ah
+
+		local startCF = nil
+		ah.MouseButton1Down:Connect(function(_)
+			startCF = part1.CFrame
+		end)
+		ah.MouseDrag:Connect(function(axis, angle)
+			if not startCF then return end
+			local worldAxis
+			if      axis == Enum.Axis.X then worldAxis =  startCF.RightVector
+			elseif  axis == Enum.Axis.Y then worldAxis =  startCF.UpVector
+			else                             worldAxis = -startCF.LookVector
+			end
+			local pos  = startCF.Position
+			local piv  = CFrame.new(pos)
+			local wRot = piv * CFrame.fromAxisAngle(worldAxis, angle) * piv:Inverse()
+			motor.C0   = motor.Part0.CFrame:Inverse() * (wRot * startCF) * motor.C1
+		end)
+		ah.MouseButton1Up:Connect(function(_)
+			poseData[limbName] = motor.C0; startCF = nil
+		end)
+
+	else
+		local mh = mk("Handles", gui, {
+			Adornee = adorn,
+			Faces   = Faces.new(Enum.NormalId.Front, Enum.NormalId.Back,
+				Enum.NormalId.Left, Enum.NormalId.Right,
+				Enum.NormalId.Top,  Enum.NormalId.Bottom),
+			Style = Enum.HandlesStyle.Movement,
+		})
+		currentMovH = mh
+
+		local startP1CF  = nil
+		local faceNormal = nil
+
+		mh.MouseButton1Down:Connect(function(face)
+			startP1CF = part1.CFrame
+			local cf  = adorn.CFrame
+			local map = {
+				[Enum.NormalId.Right]  =  cf.RightVector,
+				[Enum.NormalId.Left]   = -cf.RightVector,
+				[Enum.NormalId.Top]    =  cf.UpVector,
+				[Enum.NormalId.Bottom] = -cf.UpVector,
+				[Enum.NormalId.Front]  =  cf.LookVector,
+				[Enum.NormalId.Back]   = -cf.LookVector,
+			}
+			faceNormal = map[face] or Vector3.new(0,1,0)
+		end)
+		mh.MouseDrag:Connect(function(_, dist)
+			if not startP1CF then return end
+			local newPos   = startP1CF.Position + faceNormal * dist
+			local newPart1 = CFrame.new(newPos)
+				* CFrame.fromMatrix(Vector3.zero, startP1CF.XVector, startP1CF.YVector)
+			motor.C0 = motor.Part0.CFrame:Inverse() * newPart1 * motor.C1
+		end)
+		mh.MouseButton1Up:Connect(function(_)
+			poseData[limbName] = motor.C0; startP1CF = nil; faceNormal = nil
+		end)
+	end
+end
+
+-- ── Handle mode toggle ────────────────────────────────────────────────────────
+hmBtn.MouseButton1Click:Connect(function()
+	handleMode = handleMode == "Rotate" and "Move" or "Rotate"
+	local isR  = handleMode == "Rotate"
+	TweenService:Create(hmSlide,  TS_FAST, {Position = isR and UDim2.new(0,2,0,2) or UDim2.new(0.5,-2,0,2)}):Play()
+	TweenService:Create(hmRotLbl, TS_FAST, {TextColor3 = isR and T.Text or T.TextMuted}):Play()
+	TweenService:Create(hmMovLbl, TS_FAST, {TextColor3 = isR and T.TextMuted or T.Text}):Play()
+	if selectedLimb then spawnHandles(selectedLimb) end
+end)
+
+-- ═══════════════════════════════════════════════════════════════════════════
+--  LIMB SELECTION
+-- ═══════════════════════════════════════════════════════════════════════════
+function setLimbSelection(limbName)
+	if selectedLimbBtn then
+		TweenService:Create(selectedLimbBtn, TS_FAST, {BackgroundColor3=T.ItemBg}):Play()
+		local os = selectedLimbBtn:FindFirstChildWhichIsA("UIStroke")
+		if os then TweenService:Create(os,TS_FAST,{Color=T.Stroke}):Play() end
+		local lbl2 = selectedLimbBtn:FindFirstChildWhichIsA("TextLabel")
+		if lbl2 then TweenService:Create(lbl2,TS_FAST,{TextColor3=T.TextDim}):Play() end
+	end
+	selectedLimb    = limbName
+	selectedLimbBtn = limbBtnMap[limbName]
+	if selectedLimbBtn then
+		TweenService:Create(selectedLimbBtn, TS_FAST, {BackgroundColor3=T.ItemActive}):Play()
+		local s = selectedLimbBtn:FindFirstChildWhichIsA("UIStroke")
+		if s then TweenService:Create(s,TS_FAST,{Color=T.Accent}):Play() end
+		local lbl2 = selectedLimbBtn:FindFirstChildWhichIsA("TextLabel")
+		if lbl2 then TweenService:Create(lbl2,TS_FAST,{TextColor3=T.Text}):Play() end
+	end
+	if limbName then
+		selLbl.Text       = limbName:upper()
+		selLbl.TextColor3 = T.AccentBright
+		for _, ld in ipairs(LIMBS_DEF) do
+			if ld.name == limbName then selDot.BackgroundColor3 = ld.dotCol; break end
+		end
+		spawnHandles(limbName)
+	else
+		selLbl.Text             = "NONE"
+		selLbl.TextColor3       = T.TextMuted
+		selDot.BackgroundColor3 = T.TextMuted
+		destroyHandles()
+	end
+end
+
+-- Build limb buttons
+local VP_W = 36
+for _, ld in ipairs(LIMBS_DEF) do
+	local cell = mk("Frame", limbGrid, {
+		BackgroundColor3=T.ItemBg, LayoutOrder=ld.order, ZIndex=32,
+	})
+	corner(cell,7)
+	local s = stroke(cell,T.Stroke,1)
+
+	local vpOuter = mk("Frame", cell, {
+		Size=UDim2.new(0,VP_W,1,-4), Position=UDim2.new(0,2,0,2),
+		BackgroundColor3=Color3.fromRGB(7,3,3), ZIndex=33,
+	})
+	corner(vpOuter,5)
+
+	local vpf = mk("ViewportFrame", vpOuter, {
+		Size=UDim2.new(1,0,1,0), BackgroundTransparency=1,
+		BorderSizePixel=0, ZIndex=33,
+	})
+	local wm  = mk("WorldModel", vpf)
+	local cam = mk("Camera", nil, {FieldOfView=35})
+	vpf.CurrentCamera = cam; cam.Parent = vpf
+
+	local lightPart = mk("Part", wm, {
+		Size=Vector3.new(0.1,0.1,0.1), CFrame=CFrame.new(2,3,3),
+		Anchored=true, CanCollide=false, Transparency=1,
+	})
+	mk("PointLight", lightPart, {Brightness=4, Range=20, Color=Color3.new(1,1,1)})
+
+	vpPreviews[ld.name] = {
+		vpf=vpf, wm=wm, cam=cam,
+		angle = math.random(0,628)*0.01,
+		part=nil,
+	}
+
+	local lbl = mk("TextLabel", cell, {
+		Size     = UDim2.new(1,-(VP_W+6),1,0),
+		Position = UDim2.new(0, VP_W+4, 0, 0),
+		BackgroundTransparency=1, Text=ld.label,
+		TextColor3=T.TextDim, TextSize=8, Font=Enum.Font.GothamBold,
+		TextXAlignment=Enum.TextXAlignment.Center, ZIndex=33,
+	})
+
+	local dot = mk("Frame", cell, {
+		Size=UDim2.new(0,4,0,4),
+		Position=UDim2.new(1,-(VP_W/2+2), 1,-7),
+		BackgroundColor3=ld.dotCol, ZIndex=34,
+	})
+	corner(dot,2)
+
+	local btn = mk("TextButton", cell, {
+		Size=UDim2.new(1,0,1,0), BackgroundTransparency=1, Text="", ZIndex=35,
+	})
+
+	limbBtnMap[ld.name] = cell
+	local cap = ld
+
+	btn.MouseEnter:Connect(function()
+		if selectedLimb ~= cap.name then
+			TweenService:Create(cell,TS_FAST,{BackgroundColor3=T.ItemHover}):Play()
+			TweenService:Create(lbl, TS_FAST,{TextColor3=T.Text}):Play()
+			TweenService:Create(s,   TS_FAST,{Color=T.StrokeHot}):Play()
+		end
+	end)
+	btn.MouseLeave:Connect(function()
+		if selectedLimb ~= cap.name then
+			TweenService:Create(cell,TS_FAST,{BackgroundColor3=T.ItemBg}):Play()
+			TweenService:Create(lbl, TS_FAST,{TextColor3=T.TextDim}):Play()
+			TweenService:Create(s,   TS_FAST,{Color=T.Stroke}):Play()
+		end
+	end)
+	btn.MouseButton1Click:Connect(function()
+		if selectedLimb == cap.name then setLimbSelection(nil)
+		else setLimbSelection(cap.name) end
+	end)
+end
+
+-- ── buildLimbPreviews ─────────────────────────────────────────────────────────
+local function buildLimbPreviews()
+	if not player:HasAppearanceLoaded() then
+		player.CharacterAppearanceLoaded:Wait()
+	end
+	task.wait(0.2)
+
+	local char = player.Character
+	if not char then return end
+
+	for _, ld in ipairs(LIMBS_DEF) do
+		local vp = vpPreviews[ld.name]
+		if not vp then continue end
+
+		for _, c in ipairs(vp.wm:GetChildren()) do
+			if c.Name ~= "LightPart" then c:Destroy() end
+		end
+		vp.part = nil
+
+		char.Archivable = true
+		local clone = char:Clone()
+		char.Archivable = false
+
+		for _, v in ipairs(clone:GetDescendants()) do
+			if v:IsA("Script") or v:IsA("LocalScript") then
+				v:Destroy()
+			elseif v:IsA("BasePart") then
+				if v.Name == "HumanoidRootPart" or v.Transparency == 1 or v.Parent:IsA("Accessory") then
+					v.CanQuery = false
+				else
+					v.CanQuery = true
+				end
+			end
+		end
+
+		clone.Parent = vp.wm
+		clone:PivotTo(CFrame.new(0, 0, 0))
+
+		local targetPart = clone:FindFirstChild(ld.name)
+		if not targetPart then continue end
+
+		local function isWeldedToTarget(accHandle)
+			for _, w in ipairs(accHandle:GetChildren()) do
+				if w:IsA("Weld") or w:IsA("WeldConstraint") then
+					local p0 = w.Part0; local p1 = w.Part1
+					if p0 == targetPart or p1 == targetPart then return true end
+				end
+			end
+			return false
+		end
+
+		for _, v in ipairs(clone:GetDescendants()) do
+			if v:IsA("BasePart") then
+				local isTarget = (v == targetPart)
+				local isAccOnTarget = v.Parent:IsA("Accessory") and isWeldedToTarget(v)
+				if not isTarget and not isAccOnTarget then
+					v.Transparency = 1
+					for _, ch in ipairs(v:GetChildren()) do
+						if ch:IsA("Decal") or ch:IsA("Texture") then ch.Transparency = 1 end
+					end
+				end
+			end
+		end
+
+		local hrp = clone:FindFirstChild("HumanoidRootPart")
+		if hrp then hrp.Transparency = 1 end
+
+		vp.part = targetPart
+		local sz = targetPart.Size
+		local maxD = math.max(sz.X, sz.Y, sz.Z)
+		vp.camDist   = maxD * 2.0 + 1.2
+		vp.camTarget = targetPart.Position
+	end
+end
+
+
+-- ── Dynamic apply / reset ─────────────────────────────────────────────────────
+dynApplyBtn.MouseButton1Click:Connect(function()
+	local snap = {}
+	for _, ld in ipairs(LIMBS_DEF) do
+		local m = getMotor(ld.name)
+		if m then snap[ld.name] = m.C0 end
+	end
+	applyPoseRemote:FireServer(snap)
+	local ag = dynApplyBtn:FindFirstChildWhichIsA("UIGradient")
+	dynApplyLbl.Text = "APPLIED"
+	if ag then ag.Color = ColorSequence.new{ColorSequenceKeypoint.new(0,T.Green),ColorSequenceKeypoint.new(1,T.GreenDark)} end
+	task.delay(1.8, function()
+		if ag then ag.Color = ColorSequence.new{ColorSequenceKeypoint.new(0,T.Accent),ColorSequenceKeypoint.new(1,T.AccentDark)} end
+		dynApplyLbl.Text = "APPLY POSE TO CHARACTER"
+	end)
+end)
+
+dynResetBtn.MouseButton1Click:Connect(function()
+	ikController:disableAll()
+	for _, fn in pairs(ikBtnUpdateFns) do fn() end
+	applyPoseRemote:FireServer({})
+	dynResetLbl.Text = "RESET"
+	task.delay(1.2, function() dynResetLbl.Text = "RESET IK" end)
+end)
+
+-- ═══════════════════════════════════════════════════════════════════════════
+--  STATIC APPLY / RESET
+-- ═══════════════════════════════════════════════════════════════════════════
+applyBtn.MouseButton1Click:Connect(function()
+	local snap = {}
+	for _, ld in ipairs(LIMBS_DEF) do
+		local m = getMotor(ld.name)
+		if m then snap[ld.name] = m.C0 end
+	end
+	applyPoseRemote:FireServer(snap)
+	local ag = applyBtn:FindFirstChildWhichIsA("UIGradient")
+	applyLbl.Text = "APPLIED"
+	if ag then ag.Color = ColorSequence.new{ColorSequenceKeypoint.new(0,T.Green),ColorSequenceKeypoint.new(1,T.GreenDark)} end
+	task.delay(1.8, function()
+		if ag then ag.Color = ColorSequence.new{ColorSequenceKeypoint.new(0,T.Accent),ColorSequenceKeypoint.new(1,T.AccentDark)} end
+		applyLbl.Text = "APPLY POSE TO CHARACTER"
+	end)
+end)
+
+resetBtn.MouseButton1Click:Connect(function()
+	destroyHandles(); setLimbSelection(nil)
+	for _, ld in ipairs(LIMBS_DEF) do
+		local m = getMotor(ld.name)
+		local o = originalC0s[ld.name]
+		if m and o then m.C0 = o end
+	end
+	poseData = {}
+	applyPoseRemote:FireServer({})
+	resetLbl.Text = "RESET"
+	task.delay(1.2, function() resetLbl.Text = "RESET ALL" end)
+end)
+
+-- ═══════════════════════════════════════════════════════════════════════════
+--  PILL SWITCHES  (wired here so setAnchored/destroyHandles etc. are in scope)
+-- ═══════════════════════════════════════════════════════════════════════════
+modePillBtn.MouseButton1Click:Connect(function()
+	currentMode = currentMode == "Static" and "Dynamic" or "Static"
+	local isS   = currentMode == "Static"
+	TweenService:Create(modeSlide,   TS_FAST, {Position = isS and UDim2.new(0,2,0,2) or UDim2.new(0.5,-2,0,2)}):Play()
+	TweenService:Create(modeStatLbl, TS_FAST, {TextColor3 = isS and T.Text or T.TextMuted}):Play()
+	TweenService:Create(modeDynLbl,  TS_FAST, {TextColor3 = isS and T.TextMuted or T.Text}):Play()
+	staticContent.Visible  = isS
+	dynamicContent.Visible = not isS
+	if isS then
+		-- Switching to Static: tear down any active IK, then anchor
+		ikController:disableAll()
+		for _, fn in pairs(ikBtnUpdateFns) do fn() end
+		if not isAnchored then setAnchored(true) end
+	else
+		-- Switching to Dynamic: clear static handles/selection, release anchor so animations play
+		destroyHandles()
+		setLimbSelection(nil)
+		setAnchored(false)
+	end
+end)
+
+-- ═══════════════════════════════════════════════════════════════════════════
+--  PANEL TOGGLE
+-- ═══════════════════════════════════════════════════════════════════════════
+if toggleEvent then
+	toggleEvent.Event:Connect(function(state)
+		TweenService:Create(panel, TS, {Position = state and POS_OPEN or POS_CLOSED}):Play()
+		if state then
+			cacheOriginals()
+			task.spawn(buildLimbPreviews)
+			task.delay(0.15, function()
+				if currentMode == "Static" then setAnchored(true) end
+			end)
+		else
+			destroyHandles()
+			setLimbSelection(nil)
+			ikController:disableAll()
+			for _, fn in pairs(ikBtnUpdateFns) do fn() end
+			if isAnchored then setAnchored(false) end
+		end
+	end)
+end
+
+player.CharacterAdded:Connect(function()
+	task.wait(1.5)
+	destroyHandles()
+	ikController:disableAll()
+	for _, fn in pairs(ikBtnUpdateFns) do fn() end
+	poseData = {}; isAnchored = false
+	setLimbSelection(nil)
+	cacheOriginals()
+	task.spawn(buildLimbPreviews)
+end)
+
+if player.Character then
+	cacheOriginals()
+	task.spawn(buildLimbPreviews)
+end
+
+-- ═══════════════════════════════════════════════════════════════════════════
+--  RENDER LOOP
+-- ═══════════════════════════════════════════════════════════════════════════
+RunService.RenderStepped:Connect(function(dt)
+	-- Particles
+	for _, p in ipairs(particles) do
+		p.y -= p.speed * dt
+		if p.y < -0.1 then p.y=1.08; p.baseX=rng:NextNumber(0,1) end
+		p.gui.Position = UDim2.new(p.baseX + math.sin(tick()*p.freq+p.seed)*p.amp, 0, p.y, 0)
+	end
+
+	-- Spin viewport preview cameras
+	for _, vp in pairs(vpPreviews) do
+		if vp.part and vp.cam then
+			vp.angle = (vp.angle or 0) + dt * 0.9
+			local dist   = vp.camDist   or 3
+			local target = vp.camTarget or Vector3.zero
+			local camPos = Vector3.new(
+				target.X + math.sin(vp.angle) * dist,
+				target.Y + dist * 0.3,
+				target.Z + math.cos(vp.angle) * dist
+			)
+			vp.cam.CFrame = CFrame.lookAt(camPos, target)
+		end
+	end
+
+end)
