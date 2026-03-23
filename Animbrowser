@@ -1,0 +1,636 @@
+-- AnimBrowser.lua (LocalScript)
+
+local Players           = game:GetService("Players")
+local TweenService      = game:GetService("TweenService")
+local RunService        = game:GetService("RunService")
+local UserInputService  = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local player      = Players.LocalPlayer
+local BarEvents   = ReplicatedStorage:WaitForChild("BarEvents", 10)
+local toggleEvent = BarEvents and BarEvents:WaitForChild("ToggleAnimBrowser", 10)
+local animsRoot   = ReplicatedStorage:WaitForChild("ANIMS")
+
+-- Shared speed NumberValue (AnimPlayer reads this every frame)
+local animSpeedValue = BarEvents:FindFirstChild("AnimSpeed")
+if not animSpeedValue then
+	animSpeedValue        = Instance.new("NumberValue")
+	animSpeedValue.Name   = "AnimSpeed"
+	animSpeedValue.Value  = 1
+	animSpeedValue.Parent = BarEvents
+end
+
+local THEME = {
+	Panel        = Color3.fromRGB(19,  11, 11),
+	PanelTop     = Color3.fromRGB(27,  16, 16),
+	ItemBg       = Color3.fromRGB(30,  17, 17),
+	ItemHover    = Color3.fromRGB(46,  24, 24),
+	ItemActive   = Color3.fromRGB(90,  18, 18),
+	Accent       = Color3.fromRGB(255, 58,  58),
+	AccentBright = Color3.fromRGB(255, 115, 115),
+	AccentDark   = Color3.fromRGB(160, 18,  18),
+	AccentDeep   = Color3.fromRGB(110, 10,  10),
+	Text         = Color3.fromRGB(255, 255, 255),
+	TextDim      = Color3.fromRGB(185, 150, 150),
+	TextMuted    = Color3.fromRGB(108, 70,  70),
+	Stroke       = Color3.fromRGB(58,  30,  30),
+	StrokeHot    = Color3.fromRGB(115, 45,  45),
+}
+
+local PANEL_W   = 218
+local PANEL_H   = 460
+local PREVIEW_H = 148
+local SPEED_H   = 30          -- height of the new speed row
+local CATS      = {"Dom", "Sub", "3+", "Emote"}
+local CAM_DIST  = 14
+
+local TS      = TweenInfo.new(0.42, Enum.EasingStyle.Quart, Enum.EasingDirection.Out)
+local TS_FAST = TweenInfo.new(0.17, Enum.EasingStyle.Quart, Enum.EasingDirection.Out)
+
+local function corner(p, r)
+	local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0, r or 8); c.Parent = p; return c
+end
+local function mkStroke(p, col, thick)
+	local s = Instance.new("UIStroke"); s.Color = col or THEME.Stroke
+	s.Thickness = thick or 1; s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border; s.Parent = p; return s
+end
+local function gradient(p, c0, c1, rot)
+	local g = Instance.new("UIGradient")
+	g.Color = ColorSequence.new{ColorSequenceKeypoint.new(0, c0), ColorSequenceKeypoint.new(1, c1)}
+	g.Rotation = rot or 90; g.Parent = p; return g
+end
+
+-- ── Easing ────────────────────────────────────────────────────────────────────
+local function bounceOut(t)
+	local n, d = 7.5625, 2.75
+	if     t < 1/d   then return n*t*t
+	elseif t < 2/d   then t = t-1.5/d;  return n*t*t+0.75
+	elseif t < 2.5/d then t = t-2.25/d; return n*t*t+0.9375
+	else                   t = t-2.625/d; return n*t*t+0.984375
+	end
+end
+local function easeIn(t, s)
+	if s == "Constant" then return 0 end
+	if s == "Cubic"    then return t*t*t end
+	if s == "Bounce"   then return 1-bounceOut(1-t) end
+	if s == "Elastic"  then
+		if t == 0 then return 0 end; if t == 1 then return 1 end
+		return -(math.pow(2,10*t-10)*math.sin((t*10-10.75)*(2*math.pi/3)))
+	end
+	return t
+end
+local function easeOut(t, s)
+	if s == "Constant" then return 1 end
+	if s == "Bounce"   then return bounceOut(t) end
+	if s == "Elastic"  then
+		if t == 0 then return 0 end; if t == 1 then return 1 end
+		return math.pow(2,-10*t)*math.sin((t*10-0.75)*(2*math.pi/3))+1
+	end
+	return 1-easeIn(1-t, s)
+end
+local function applyEasing(t, es, ed)
+	es = es or "Linear"; ed = ed or "Out"
+	if es == "Linear" then return t end
+	if ed == "In"     then return easeIn(t, es) end
+	if ed == "Out"    then return easeOut(t, es) end
+	if t < 0.5 then return easeIn(t*2, es)*0.5 end
+	return easeOut((t-0.5)*2, es)*0.5+0.5
+end
+
+-- ── Animation loader ──────────────────────────────────────────────────────────
+local animCache = {}
+
+local function loadAnim(cat, animName)
+	animCache[cat] = animCache[cat] or {}
+	if animCache[cat][animName] then return animCache[cat][animName] end
+
+	local catFolder = animsRoot:FindFirstChild(cat)
+	if not catFolder then return nil end
+	local mod = catFolder:FindFirstChild(animName)
+	if not mod or not mod:IsA("ModuleScript") then return nil end
+
+	local ok, raw = pcall(require, mod)
+	if not ok or type(raw) ~= "table" then return nil end
+
+	local timeline, jointSet, duration = {}, {}, 0
+
+	for _, keyframe in ipairs(raw) do
+		if type(keyframe) ~= "table" then continue end
+		local t = keyframe.tm
+		if type(t) ~= "number" then continue end
+		if t > duration then duration = t end
+		for partName, data in pairs(keyframe) do
+			if partName == "tm" or type(data) ~= "table" then continue end
+			local cf = data.cf
+			if typeof(cf) ~= "CFrame" then continue end
+			if not timeline[partName] then timeline[partName] = {}; jointSet[partName] = true end
+			table.insert(timeline[partName], { t=t, cf=cf, es=data.es or "Linear", ed=data.ed or "Out" })
+		end
+	end
+
+	for _, tl in pairs(timeline) do
+		table.sort(tl, function(a, b) return a.t < b.t end)
+	end
+
+	local joints = {}
+	for name in pairs(jointSet) do table.insert(joints, name) end
+	table.sort(joints)
+
+	if #joints == 0 then return nil end
+
+	local anim = { duration=duration, joints=joints, timeline=timeline }
+	animCache[cat][animName] = anim
+	return anim
+end
+
+-- ── GUI shell ─────────────────────────────────────────────────────────────────
+local gui = Instance.new("ScreenGui")
+gui.Name = "AnimBrowserGUI"; gui.ResetOnSpawn = false
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+gui.IgnoreGuiInset = true
+gui.Parent = player:WaitForChild("PlayerGui")
+
+local POS_CLOSED = UDim2.new(1,  20,          0.5, -PANEL_H/2)
+local POS_OPEN   = UDim2.new(1, -(PANEL_W+8), 0.5, -PANEL_H/2)
+
+local panel = Instance.new("Frame")
+panel.Name = "AnimBrowser"; panel.Size = UDim2.new(0, PANEL_W, 0, PANEL_H)
+panel.Position = POS_CLOSED; panel.BackgroundColor3 = THEME.Panel
+panel.ClipsDescendants = true; panel.ZIndex = 30; panel.Parent = gui
+corner(panel, 14); mkStroke(panel, THEME.Stroke, 1.5)
+
+local panelBg = Instance.new("UIGradient")
+panelBg.Color = ColorSequence.new{
+	ColorSequenceKeypoint.new(0,    Color3.fromRGB(29, 16, 16)),
+	ColorSequenceKeypoint.new(0.55, Color3.fromRGB(18, 10, 10)),
+	ColorSequenceKeypoint.new(1,    Color3.fromRGB(11,  6,  6)),
+}
+panelBg.Rotation = 130; panelBg.Parent = panel
+
+local pHost = Instance.new("Frame", panel)
+pHost.Size = UDim2.new(1, 0, 1, 0); pHost.BackgroundTransparency = 1; pHost.ZIndex = 1
+
+local particles, rng = {}, Random.new()
+for i = 1, 12 do
+	local p = Instance.new("Frame"); local sz = rng:NextNumber(3, 16)
+	p.Size = UDim2.new(0, sz, 0, sz)
+	p.BackgroundColor3 = (i%4==0) and THEME.AccentBright or THEME.Accent
+	p.BackgroundTransparency = rng:NextNumber(0.90, 0.97)
+	p.BorderSizePixel = 0; p.ZIndex = 1; corner(p, 50); p.Parent = pHost
+	table.insert(particles, {
+		gui=p, baseX=rng:NextNumber(0,1), y=rng:NextNumber(0,1),
+		speed=rng:NextNumber(0.012,0.048), amp=rng:NextNumber(0.012,0.040),
+		freq=rng:NextNumber(0.4,2.0), seed=rng:NextNumber(0,math.pi*2),
+	})
+end
+
+-- ── Title bar ─────────────────────────────────────────────────────────────────
+local titleBar = Instance.new("Frame", panel)
+titleBar.Size = UDim2.new(1,0,0,46); titleBar.BackgroundColor3 = THEME.PanelTop
+titleBar.ZIndex = 32; corner(titleBar, 14)
+
+local titleFlat = Instance.new("Frame", titleBar)
+titleFlat.Size = UDim2.new(1,0,0,14); titleFlat.Position = UDim2.new(0,0,1,-14)
+titleFlat.BackgroundColor3 = THEME.PanelTop; titleFlat.ZIndex = 32
+
+local accentLine = Instance.new("Frame", titleBar)
+accentLine.Size = UDim2.new(1,0,0,2); accentLine.Position = UDim2.new(0,0,1,-1)
+accentLine.BackgroundColor3 = Color3.new(1,1,1); accentLine.ZIndex = 33
+gradient(accentLine, THEME.AccentDeep, THEME.Accent, 0)
+
+local titleDot = Instance.new("Frame", titleBar)
+titleDot.Size = UDim2.new(0,7,0,7); titleDot.Position = UDim2.new(0,12,0.5,-3)
+titleDot.BackgroundColor3 = THEME.Accent; titleDot.ZIndex = 34
+corner(titleDot, 4); mkStroke(titleDot, THEME.AccentBright, 1)
+
+local titleLbl = Instance.new("TextLabel", titleBar)
+titleLbl.Size = UDim2.new(1,-28,1,0); titleLbl.Position = UDim2.new(0,26,0,0)
+titleLbl.BackgroundTransparency = 1; titleLbl.Text = "ANIMATIONS"
+titleLbl.TextColor3 = THEME.Text; titleLbl.TextSize = 11
+titleLbl.Font = Enum.Font.GothamBlack; titleLbl.TextXAlignment = Enum.TextXAlignment.Left
+titleLbl.ZIndex = 33
+
+-- ── Viewport (preview dummy) ──────────────────────────────────────────────────
+local vpOuter = Instance.new("Frame", panel)
+vpOuter.Size = UDim2.new(1,-16,0,PREVIEW_H); vpOuter.Position = UDim2.new(0,8,0,52)
+vpOuter.BackgroundColor3 = Color3.fromRGB(7,3,3); vpOuter.ZIndex = 31
+corner(vpOuter, 10); mkStroke(vpOuter, THEME.Stroke, 1.5)
+
+local vpf = Instance.new("ViewportFrame", vpOuter)
+vpf.Size = UDim2.new(1,0,1,0); vpf.BackgroundTransparency = 1
+vpf.BorderSizePixel = 0; vpf.ZIndex = 31
+
+local worldModel = Instance.new("WorldModel", vpf)
+
+local lightPart = Instance.new("Part", worldModel)
+lightPart.Size = Vector3.new(0.1,0.1,0.1); lightPart.CFrame = CFrame.new(4,8,8)
+lightPart.Anchored = true; lightPart.CanCollide = false; lightPart.Transparency = 1
+local vpLight = Instance.new("PointLight", lightPart)
+vpLight.Brightness = 4; vpLight.Range = 40; vpLight.Color = Color3.new(1,1,1)
+
+local vpCam = Instance.new("Camera"); vpCam.FieldOfView = 35; vpf.CurrentCamera = vpCam
+
+local previewLbl = Instance.new("TextLabel", vpOuter)
+previewLbl.Size = UDim2.new(1,0,1,0); previewLbl.BackgroundTransparency = 1
+previewLbl.Text = "hover to preview"; previewLbl.TextColor3 = THEME.TextMuted
+previewLbl.TextSize = 9; previewLbl.Font = Enum.Font.GothamBold; previewLbl.ZIndex = 32
+
+-- ── Speed slider ──────────────────────────────────────────────────────────────
+-- Sits between the viewport and the category tabs
+local SPEED_Y = 52 + PREVIEW_H + 4   -- 4px gap below viewport
+
+local speedRow = Instance.new("Frame", panel)
+speedRow.Size             = UDim2.new(1,-16,0,SPEED_H)
+speedRow.Position         = UDim2.new(0,8,0,SPEED_Y)
+speedRow.BackgroundColor3 = Color3.fromRGB(12,6,6)
+speedRow.ZIndex           = 31
+corner(speedRow, 8); mkStroke(speedRow, THEME.Stroke, 1)
+
+-- "SPEED" label
+local speedLbl = Instance.new("TextLabel", speedRow)
+speedLbl.Size                   = UDim2.new(0,44,1,0)
+speedLbl.Position               = UDim2.new(0,8,0,0)
+speedLbl.BackgroundTransparency = 1
+speedLbl.Text                   = "SPEED"
+speedLbl.TextColor3             = THEME.TextMuted
+speedLbl.TextSize               = 8
+speedLbl.Font                   = Enum.Font.GothamBlack
+speedLbl.TextXAlignment         = Enum.TextXAlignment.Left
+speedLbl.ZIndex                 = 32
+
+-- Value readout on the right
+local speedValLbl = Instance.new("TextLabel", speedRow)
+speedValLbl.Size                   = UDim2.new(0,36,1,0)
+speedValLbl.Position               = UDim2.new(1,-38,0,0)
+speedValLbl.BackgroundTransparency = 1
+speedValLbl.Text                   = "1.0×"
+speedValLbl.TextColor3             = THEME.AccentBright
+speedValLbl.TextSize               = 9
+speedValLbl.Font                   = Enum.Font.GothamBlack
+speedValLbl.TextXAlignment         = Enum.TextXAlignment.Right
+speedValLbl.ZIndex                 = 32
+
+-- Thin track
+local speedTrack = Instance.new("Frame", speedRow)
+speedTrack.Size             = UDim2.new(1,-96,0,4)
+speedTrack.Position         = UDim2.new(0,54,0.5,-2)
+speedTrack.BackgroundColor3 = THEME.Stroke
+speedTrack.ZIndex           = 32
+corner(speedTrack, 2)
+
+local speedFill = Instance.new("Frame", speedTrack)
+speedFill.Size             = UDim2.new(1/6, 0, 1, 0)   -- default 1 out of 6
+speedFill.BackgroundColor3 = THEME.Accent
+speedFill.ZIndex           = 33
+corner(speedFill, 2)
+gradient(speedFill, THEME.AccentDeep, THEME.AccentBright, 0)
+
+-- Vertical notch knob
+local speedNotch = Instance.new("Frame", speedTrack)
+speedNotch.Size             = UDim2.new(0,3,1,8)
+speedNotch.AnchorPoint      = Vector2.new(0.5,0.5)
+speedNotch.Position         = UDim2.new(1/6, 0, 0.5, 0)
+speedNotch.BackgroundColor3 = Color3.new(1,1,1)
+speedNotch.ZIndex           = 34
+corner(speedNotch, 2)
+gradient(speedNotch, THEME.AccentBright, THEME.Accent, 90)
+
+-- Transparent hitbox over the track area
+local speedHitbox = Instance.new("TextButton", speedRow)
+speedHitbox.Size                   = UDim2.new(1,-96,1,0)
+speedHitbox.Position               = UDim2.new(0,54,0,0)
+speedHitbox.BackgroundTransparency = 1
+speedHitbox.Text                   = ""
+speedHitbox.ZIndex                 = 35
+
+local speedDragging = false
+
+local function setSpeed(alpha)
+	alpha = math.clamp(alpha, 0, 1)
+	local speed = alpha * 6
+	speedFill.Size      = UDim2.new(alpha, 0, 1, 0)
+	speedNotch.Position = UDim2.new(alpha, 0, 0.5, 0)
+	speedValLbl.Text    = string.format("%.1f×", speed)
+	animSpeedValue.Value = speed
+end
+
+speedHitbox.InputBegan:Connect(function(inp)
+	if inp.UserInputType == Enum.UserInputType.MouseButton1 then
+		speedDragging = true
+		local a = math.clamp(
+			(inp.Position.X - speedTrack.AbsolutePosition.X) / speedTrack.AbsoluteSize.X, 0, 1)
+		setSpeed(a)
+	end
+end)
+
+UserInputService.InputChanged:Connect(function(inp)
+	if speedDragging and inp.UserInputType == Enum.UserInputType.MouseMovement then
+		local a = math.clamp(
+			(inp.Position.X - speedTrack.AbsolutePosition.X) / speedTrack.AbsoluteSize.X, 0, 1)
+		setSpeed(a)
+	end
+end)
+
+UserInputService.InputEnded:Connect(function(inp)
+	if inp.UserInputType == Enum.UserInputType.MouseButton1 then
+		speedDragging = false
+	end
+end)
+
+-- ── Category tabs ─────────────────────────────────────────────────────────────
+local TAB_Y  = SPEED_Y  + SPEED_H + 4
+local LIST_Y = TAB_Y + 28 + 4
+
+local tabRow = Instance.new("Frame", panel)
+tabRow.Size = UDim2.new(1,-16,0,28); tabRow.Position = UDim2.new(0,8,0,TAB_Y)
+tabRow.BackgroundTransparency = 1; tabRow.ZIndex = 31
+
+local tabList = Instance.new("UIListLayout", tabRow)
+tabList.FillDirection        = Enum.FillDirection.Horizontal
+tabList.HorizontalAlignment  = Enum.HorizontalAlignment.Center
+tabList.VerticalAlignment    = Enum.VerticalAlignment.Center
+tabList.Padding              = UDim.new(0, 4)
+
+local activeCatTab, catTabBtns = nil, {}
+
+local function makeCatTab(name, order)
+	local btn = Instance.new("TextButton", tabRow)
+	btn.Size = UDim2.new(0,44,0,26); btn.BackgroundColor3 = THEME.ItemBg
+	btn.Text = name; btn.TextColor3 = THEME.TextMuted; btn.TextSize = 9
+	btn.Font = Enum.Font.GothamBold; btn.LayoutOrder = order; btn.ZIndex = 32
+	corner(btn, 6)
+	local s = mkStroke(btn, THEME.Stroke, 1)
+	catTabBtns[name] = {btn=btn, stroke=s}
+	return btn
+end
+
+local function setActiveTab(name)
+	if activeCatTab then
+		local old = catTabBtns[activeCatTab]
+		TweenService:Create(old.btn,    TS_FAST, {BackgroundColor3=THEME.ItemBg,    TextColor3=THEME.TextMuted}):Play()
+		TweenService:Create(old.stroke, TS_FAST, {Color=THEME.Stroke}):Play()
+	end
+	activeCatTab = name
+	local cur = catTabBtns[name]
+	TweenService:Create(cur.btn,    TS_FAST, {BackgroundColor3=THEME.ItemActive, TextColor3=THEME.Text}):Play()
+	TweenService:Create(cur.stroke, TS_FAST, {Color=THEME.Accent}):Play()
+end
+
+-- ── Animation list ────────────────────────────────────────────────────────────
+local listOuter = Instance.new("Frame", panel)
+listOuter.Size             = UDim2.new(1,-16,1,-(LIST_Y+8))
+listOuter.Position         = UDim2.new(0,8,0,LIST_Y)
+listOuter.BackgroundColor3 = Color3.fromRGB(14,7,7)
+listOuter.ZIndex           = 31
+corner(listOuter, 10); mkStroke(listOuter, THEME.Stroke, 1)
+
+local animScroll = Instance.new("ScrollingFrame", listOuter)
+animScroll.Size                    = UDim2.new(1,-4,1,-4)
+animScroll.Position                = UDim2.new(0,2,0,2)
+animScroll.BackgroundTransparency  = 1
+animScroll.BorderSizePixel         = 0
+animScroll.ScrollBarThickness      = 3
+animScroll.ScrollBarImageColor3    = THEME.Accent
+animScroll.VerticalScrollBarInset  = Enum.ScrollBarInset.ScrollBar
+animScroll.CanvasSize              = UDim2.new(0,0,0,0)
+animScroll.AutomaticCanvasSize     = Enum.AutomaticSize.Y
+animScroll.ZIndex                  = 32
+
+local sp = Instance.new("UIPadding", animScroll)
+sp.PaddingTop = UDim.new(0,4); sp.PaddingBottom = UDim.new(0,4)
+sp.PaddingLeft = UDim.new(0,4); sp.PaddingRight = UDim.new(0,4)
+
+local animLayout = Instance.new("UIListLayout", animScroll)
+animLayout.Padding              = UDim.new(0, 4)
+animLayout.HorizontalAlignment  = Enum.HorizontalAlignment.Center
+
+-- ── Preview dummy ─────────────────────────────────────────────────────────────
+local previewDummy  = nil
+local previewJoints = {}
+local uniqueJoints  = {}
+local camAngle      = math.rad(180)
+
+local function buildPreviewDummy()
+	if previewDummy then previewDummy:Destroy(); previewDummy = nil end
+	previewJoints = {}
+	uniqueJoints  = {}
+
+	if not player:HasAppearanceLoaded() then
+		player.CharacterAppearanceLoaded:Wait()
+	end
+	task.wait(0.2)
+
+	local char = player.Character
+	if not char then return end
+
+	char.Archivable = true
+	local clone = char:Clone()
+	char.Archivable = false
+
+	for _, v in pairs(clone:GetDescendants()) do
+		if v:IsA("Script") or v:IsA("LocalScript") then v:Destroy() end
+	end
+
+	clone.Parent = worldModel
+	clone:PivotTo(CFrame.new(0, 0, 0))
+	previewDummy = clone
+
+	local seenMotors = {}
+	for _, v in pairs(clone:GetDescendants()) do
+		if v:IsA("Motor6D") then
+			local entry = { motor=v, origC0=v.C0 }
+			if v.Part1 and not previewJoints[v.Part1.Name] then
+				previewJoints[v.Part1.Name] = entry
+			end
+			if not previewJoints[v.Name] then
+				previewJoints[v.Name] = entry
+			end
+			if not seenMotors[v] then
+				seenMotors[v] = true
+				local key = (v.Part1 and v.Part1.Name) or v.Name
+				table.insert(uniqueJoints, { partName=key, entry=entry })
+			end
+		end
+	end
+end
+
+-- ── Preview playback ──────────────────────────────────────────────────────────
+local previewAnim    = nil
+local previewElapsed = 0
+local previewActive  = false
+local previewToken   = 0
+local jointCursors   = {}
+
+local function resetAllJoints()
+	for _, item in ipairs(uniqueJoints) do
+		local e = item.entry
+		if e.motor and e.motor.Parent then e.motor.C0 = e.origC0 end
+	end
+end
+
+local function startPreview(cat, animName)
+	previewActive = false; previewAnim = nil; previewElapsed = 0; jointCursors = {}
+	previewLbl.Visible = false
+	if not previewDummy then buildPreviewDummy() end
+
+	previewToken += 1
+	local myToken = previewToken
+	task.spawn(function()
+		local anim = loadAnim(cat, animName)
+		if previewToken ~= myToken then return end
+		if not anim then previewLbl.Text = "no data"; previewLbl.Visible = true; return end
+		for _, name in ipairs(anim.joints) do jointCursors[name] = 1 end
+		previewAnim = anim; previewElapsed = 0; previewActive = true
+	end)
+end
+
+local function stopPreview()
+	previewToken += 1
+	previewActive = false; previewAnim = nil; previewElapsed = 0; jointCursors = {}
+	resetAllJoints()
+	previewLbl.Text = "hover to preview"; previewLbl.Visible = true
+end
+
+-- ── List population ───────────────────────────────────────────────────────────
+local function waitForChildren(folder, timeout)
+	local t = 0
+	while #folder:GetChildren() == 0 and t < timeout do task.wait(0.1); t += 0.1 end
+	return folder:GetChildren()
+end
+
+local function makeAnimButton(catName, animName)
+	local btn = Instance.new("TextButton", animScroll)
+	btn.Size = UDim2.new(1,-6,0,34); btn.BackgroundColor3 = THEME.ItemBg
+	btn.Text = ""; btn.ZIndex = 33; corner(btn, 7)
+	local bs = mkStroke(btn, THEME.Stroke, 1)
+
+	local nameLbl = Instance.new("TextLabel", btn)
+	nameLbl.Size = UDim2.new(1,-28,1,0); nameLbl.Position = UDim2.new(0,10,0,0)
+	nameLbl.BackgroundTransparency = 1; nameLbl.Text = animName
+	nameLbl.TextColor3 = THEME.TextDim; nameLbl.TextSize = 10
+	nameLbl.Font = Enum.Font.GothamBold; nameLbl.TextXAlignment = Enum.TextXAlignment.Left
+	nameLbl.TextTruncate = Enum.TextTruncate.AtEnd; nameLbl.ZIndex = 34
+
+	local arrow = Instance.new("TextLabel", btn)
+	arrow.Size = UDim2.new(0,18,1,0); arrow.Position = UDim2.new(1,-22,0,0)
+	arrow.BackgroundTransparency = 1; arrow.Text = "▸"
+	arrow.TextColor3 = THEME.AccentDark; arrow.TextSize = 12
+	arrow.Font = Enum.Font.GothamBold; arrow.ZIndex = 34
+
+	btn.MouseEnter:Connect(function()
+		TweenService:Create(btn,     TS_FAST, {BackgroundColor3=THEME.ItemHover}):Play()
+		TweenService:Create(bs,      TS_FAST, {Color=THEME.StrokeHot}):Play()
+		TweenService:Create(nameLbl, TS_FAST, {TextColor3=THEME.Text}):Play()
+		TweenService:Create(arrow,   TS_FAST, {TextColor3=THEME.Accent}):Play()
+		startPreview(catName, animName)
+	end)
+
+	btn.MouseLeave:Connect(function()
+		TweenService:Create(btn,     TS_FAST, {BackgroundColor3=THEME.ItemBg}):Play()
+		TweenService:Create(bs,      TS_FAST, {Color=THEME.Stroke}):Play()
+		TweenService:Create(nameLbl, TS_FAST, {TextColor3=THEME.TextDim}):Play()
+		TweenService:Create(arrow,   TS_FAST, {TextColor3=THEME.AccentDark}):Play()
+		stopPreview()
+	end)
+
+	btn.MouseButton1Click:Connect(function()
+		local ev = BarEvents and BarEvents:FindFirstChild("PlayAnim")
+		if ev then ev:Fire(catName, animName) end
+	end)
+end
+
+local function populateCategory(catName)
+	for _, child in pairs(animScroll:GetChildren()) do
+		if child:IsA("GuiObject") then child:Destroy() end
+	end
+	local catFolder = animsRoot:WaitForChild(catName, 10)
+	if not catFolder then return end
+	local children = waitForChildren(catFolder, 5)
+	local mods = {}
+	for _, child in ipairs(children) do
+		if child:IsA("ModuleScript") then table.insert(mods, child) end
+	end
+	table.sort(mods, function(a, b) return a.Name < b.Name end)
+	for _, m in ipairs(mods) do makeAnimButton(catName, m.Name) end
+end
+
+for i, cat in ipairs(CATS) do
+	local btn = makeCatTab(cat, i)
+	btn.MouseButton1Click:Connect(function()
+		stopPreview(); setActiveTab(cat); task.spawn(populateCategory, cat)
+	end)
+end
+setActiveTab(CATS[1])
+task.spawn(populateCategory, CATS[1])
+
+if toggleEvent then
+	toggleEvent.Event:Connect(function(state)
+		TweenService:Create(panel, TS, {Position = state and POS_OPEN or POS_CLOSED}):Play()
+		if state and not previewDummy then task.spawn(buildPreviewDummy) end
+		if not state then stopPreview() end
+	end)
+end
+
+player.CharacterAdded:Connect(function()
+	task.wait(1.5); stopPreview(); task.spawn(buildPreviewDummy)
+end)
+
+if player.Character then task.spawn(buildPreviewDummy) end
+
+-- ── Render loop ───────────────────────────────────────────────────────────────
+RunService.RenderStepped:Connect(function(dt)
+	panelBg.Rotation = (panelBg.Rotation + dt*5) % 360
+
+	for _, p in ipairs(particles) do
+		p.y -= p.speed * dt
+		if p.y < -0.1 then p.y = 1.08; p.baseX = rng:NextNumber(0, 1) end
+		p.gui.Position = UDim2.new(p.baseX + math.sin(tick()*p.freq+p.seed)*p.amp, 0, p.y, 0)
+	end
+
+	-- Preview also respects the speed slider so hovering shows the correct tempo
+	if previewActive and previewAnim and previewDummy then
+		local anim     = previewAnim
+		local duration = anim.duration
+		local spd      = math.max(animSpeedValue.Value, 0)
+
+		previewElapsed += dt * spd
+		if duration > 0 and previewElapsed >= duration then
+			previewElapsed = previewElapsed % duration
+			for _, name in ipairs(anim.joints) do jointCursors[name] = 1 end
+		end
+
+		local t = previewElapsed
+
+		for _, item in ipairs(uniqueJoints) do
+			local partName = item.partName
+			local entry    = item.entry
+			if not entry.motor or not entry.motor.Parent then continue end
+
+			local tl = anim.timeline[partName]
+			if not tl then entry.motor.C0 = entry.origC0; continue end
+
+			local motor = entry.motor
+			local n     = #tl
+
+			if t <= tl[1].t then motor.C0 = entry.origC0 * tl[1].cf; continue end
+			if t >= tl[n].t then motor.C0 = entry.origC0 * tl[n].cf; continue end
+
+			local cursor = jointCursors[partName] or 1
+			while cursor < n-1 and tl[cursor+1].t <= t do cursor += 1 end
+			jointCursors[partName] = cursor
+
+			local kA, kB = tl[cursor], tl[cursor+1]
+			local span   = kB.t - kA.t
+			local raw    = (span > 0) and math.clamp((t-kA.t)/span, 0, 1) or 0
+			motor.C0 = entry.origC0 * kA.cf:Lerp(kB.cf, applyEasing(raw, kA.es, kA.ed))
+		end
+	end
+
+	if previewDummy then
+		local hrp = previewDummy:FindFirstChild("HumanoidRootPart")
+		if hrp then
+			local offset = CFrame.Angles(0, camAngle, 0) * CFrame.new(0, 0, CAM_DIST)
+			vpCam.CFrame = CFrame.new(hrp.Position + Vector3.new(0, 0.5, 0)) * offset
+		end
+	end
+end)
