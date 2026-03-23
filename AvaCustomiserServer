@@ -1,0 +1,190 @@
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local remote = ReplicatedStorage:FindFirstChild("ApplyAvatarCustomization")
+if not remote then
+	remote = Instance.new("RemoteEvent")
+	remote.Name = "ApplyAvatarCustomization"
+	remote.Parent = ReplicatedStorage
+end
+
+local function getPlayerSkinTone(char)
+	if char then
+		local bodyColors = char:FindFirstChildWhichIsA("BodyColors")
+		if bodyColors then return bodyColors.HeadColor3 end
+		local head = char:FindFirstChild("Head")
+		if head and head:IsA("BasePart") then return head.Color end
+	end
+	return Color3.new(1, 0.8, 0.6)
+end
+
+local function ApplyPositioningLogic(morphModel, character, category)
+	local function WeldGroup(model)
+		for _, child in pairs(model:GetChildren()) do
+			if child:IsA("Model") or child:IsA("Folder") then
+				WeldGroup(child)
+			elseif child:IsA("BasePart") then
+				child.Anchored = false
+				child.Massless = true
+				child.CanCollide = false
+				if child.Name == "Middle" or child:FindFirstChild("Hidden") then child.Transparency = 1 end
+
+				if model:FindFirstChild("Middle") and child ~= model.Middle then
+					local w = Instance.new("Weld")
+					w.Part0 = model.Middle
+					w.Part1 = child
+					w.C0 = model.Middle.CFrame:inverse() * CFrame.new(model.Middle.Position)
+					w.C1 = child.CFrame:inverse() * CFrame.new(model.Middle.Position)
+					w.Parent = model.Middle
+				end
+			end
+		end
+	end
+
+	WeldGroup(morphModel)
+
+	local function SetupMotor(obj, parentPart, offset)
+		if not obj or not obj:FindFirstChild("Middle") or not parentPart then return end
+		local m6dName = "M6D" .. obj.Name
+		if parentPart:FindFirstChild(m6dName) then parentPart[m6dName]:Destroy() end
+
+		local m6d = Instance.new("Motor6D")
+		m6d.Name = m6dName
+		m6d.Part0 = parentPart
+		m6d.Part1 = obj.Middle
+		m6d.C0 = offset
+		m6d.C1 = CFrame.new(0, 0, 0)
+		m6d:SetAttribute("MorphCategory", category)
+		m6d.Parent = parentPart
+		obj.Middle.Name = m6dName
+	end
+
+	local torso = character:FindFirstChild("Torso")
+	if torso then
+		if morphModel:FindFirstChild("Rod") then SetupMotor(morphModel.Rod, torso, CFrame.new(0, -torso.Size.Y / 2, -torso.Size.Z / 2)) end
+		if morphModel:FindFirstChild("Orbs") then SetupMotor(morphModel.Orbs, torso, CFrame.new(0, -torso.Size.Y / 2, -torso.Size.Z / 2)) end
+		if morphModel:FindFirstChild("UpperL") then SetupMotor(morphModel.UpperL, torso, CFrame.new(-torso.Size.X / 8, torso.Size.Y / 2, -torso.Size.Z / 2)) end
+		if morphModel:FindFirstChild("UpperR") then SetupMotor(morphModel.UpperR, torso, CFrame.new(torso.Size.X / 8, torso.Size.Y / 2, -torso.Size.Z / 2)) end
+		if morphModel:FindFirstChild("LowerL") then SetupMotor(morphModel.LowerL, torso, CFrame.new(-torso.Size.X / 8, -torso.Size.Y / 2, torso.Size.Z / 2)) end
+		if morphModel:FindFirstChild("LowerR") then SetupMotor(morphModel.LowerR, torso, CFrame.new(torso.Size.X / 8, -torso.Size.Y / 2, torso.Size.Z / 2)) end
+
+		local staticNames = {"UpperStatic", "UpperStaticA", "UpperStaticB", "LowerStatic", "LowerStaticA", "LowerStaticB", "RearStatic", "TorsoAcc", "Cage"}
+		for _, name in pairs(staticNames) do
+			if morphModel:FindFirstChild(name) then
+				local obj = morphModel[name]
+				if obj:FindFirstChild("Middle") then
+					local w = Instance.new("Weld")
+					w.Part0 = torso
+					w.Part1 = obj.Middle
+					w.C0 = CFrame.new(0, 0, 0)
+					w:SetAttribute("MorphCategory", category)
+					w.Parent = w.Part0
+				end
+			end
+		end
+	end
+
+	local limbMap = {
+		["HeadAcc"] = "Head", ["ArmL"] = "Left Arm",["ArmR"] = "Right Arm", 
+		["LegL"] = "Left Leg", ["LegR"] = "Right Leg", ["BodyLeftArm"] = "Left Arm",
+		["BodyRightArm"] = "Right Arm", ["BodyLeftLeg"] = "Left Leg", 
+		["BodyRightLeg"] = "Right Leg", ["BodyTorso"] = "Torso"
+	}
+
+	for mName, cName in pairs(limbMap) do
+		if morphModel:FindFirstChild(mName) and character:FindFirstChild(cName) then
+			local obj = morphModel[mName]
+			if obj:FindFirstChild("Middle") then
+				local w = Instance.new("Weld")
+				w.Part0 = character[cName]
+				w.Part1 = obj.Middle
+				w.C0 = CFrame.new(0, 0, 0)
+				w:SetAttribute("MorphCategory", category)
+				w.Parent = w.Part0
+			end
+		end
+	end
+end
+
+-- STRICTLY R6 Limbs Fetcher
+local function getLimbs(character, category)
+	local limbs = {}
+	if category == "Torso" then table.insert(limbs, character:FindFirstChild("Torso"))
+	elseif category == "LeftArm" then table.insert(limbs, character:FindFirstChild("Left Arm"))
+	elseif category == "RightArm" then table.insert(limbs, character:FindFirstChild("Right Arm"))
+	elseif category == "LeftLeg" then table.insert(limbs, character:FindFirstChild("Left Leg"))
+	elseif category == "RightLeg" then table.insert(limbs, character:FindFirstChild("Right Leg"))
+	end
+
+	local actualLimbs = {}
+	for _, l in pairs(limbs) do if l then table.insert(actualLimbs, l) end end
+	return actualLimbs
+end
+
+local function applyMorph(character, category, meshName)
+	for _, v in pairs(character:GetDescendants()) do
+		if v:GetAttribute("MorphCategory") == category then
+			v:Destroy()
+		end
+	end
+
+	local limbs = getLimbs(character, category)
+
+	if meshName == "Default" then
+		for _, limb in pairs(limbs) do
+			if limb.Name ~= "HumanoidRootPart" then limb.Transparency = 0 end
+			for _, child in pairs(limb:GetChildren()) do
+				if child:IsA("Decal") or child:IsA("Texture") then child.Transparency = 0 end
+			end
+		end
+		return
+	end
+
+	local morphsFolder = ReplicatedStorage:FindFirstChild("MORPHS")
+	if not morphsFolder then return end
+
+	local categoryFolder = morphsFolder:FindFirstChild(category)
+	if categoryFolder then
+		local selectedMorph = categoryFolder:FindFirstChild(meshName)
+		if selectedMorph then
+			for _, limb in pairs(limbs) do
+				limb.Transparency = 1
+				for _, child in pairs(limb:GetChildren()) do
+					if child:IsA("Decal") or child:IsA("Texture") then child.Transparency = 1 end
+				end
+			end
+
+			local morphClone = selectedMorph:Clone()
+
+			local skinTone = getPlayerSkinTone(character)
+			for _, desc in pairs(morphClone:GetDescendants()) do
+				if desc.Name:lower() == "color5" then
+					if desc:IsA("BasePart") then
+						desc.Color = skinTone
+					elseif desc:IsA("DataModelMesh") then
+						desc.VertexColor = Vector3.new(skinTone.R, skinTone.G, skinTone.B)
+					end
+				end
+			end
+
+			for _, child in pairs(morphClone:GetChildren()) do
+				child:SetAttribute("MorphCategory", category)
+			end
+
+			ApplyPositioningLogic(morphClone, character, category)
+
+			for _, item in pairs(morphClone:GetChildren()) do
+				item.Parent = character
+			end
+			morphClone:Destroy()
+		end
+	end
+end
+
+remote.OnServerEvent:Connect(function(player, pendingChanges)
+	local character = player.Character
+	if not character then return end
+
+	for category, meshName in pairs(pendingChanges) do
+		applyMorph(character, category, meshName)
+	end
+end)
