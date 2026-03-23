@@ -1,0 +1,272 @@
+-- BillboardSync.lua  (LocalScript – StarterPlayerScripts)
+
+local Players           = game:GetService("Players")
+local UserInputService  = game:GetService("UserInputService")
+local TweenService      = game:GetService("TweenService")
+local SoundService      = game:GetService("SoundService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+-- ── Config ────────────────────────────────────────────────────────────────────
+local MAX_SYNC_DISTANCE     = 20
+local POPUP_TIMEOUT         = 15
+local NOTIFICATION_SOUND_ID = "rbxassetid://0"
+local NOTIFICATION_VOLUME   = 0.75
+local CARD_Y                = 16    -- Y position of slide-in cards
+
+-- ── Refs ──────────────────────────────────────────────────────────────────────
+local player    = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+local camera    = workspace.CurrentCamera
+
+local SyncRemotes = ReplicatedStorage:WaitForChild("SyncRemotes", 60)
+if not SyncRemotes then return end
+
+local SyncRequest   = SyncRemotes:WaitForChild("SyncRequest",   30)
+local SyncInvite    = SyncRemotes:WaitForChild("SyncInvite",    30)
+local SyncRespond   = SyncRemotes:WaitForChild("SyncRespond",   30)
+local SyncState     = SyncRemotes:WaitForChild("SyncState",     30)
+local UnsyncRequest = SyncRemotes:WaitForChild("UnsyncRequest", 30)
+
+-- ── Theme ─────────────────────────────────────────────────────────────────────
+local T = {
+	Panel        = Color3.fromRGB(19,  11, 11),
+	Accent       = Color3.fromRGB(255, 58,  58),
+	AccentBright = Color3.fromRGB(255, 115, 115),
+	AccentDark   = Color3.fromRGB(160, 18,  18),
+	AccentDeep   = Color3.fromRGB(110, 10,  10),
+	Text         = Color3.fromRGB(255, 255, 255),
+	TextMuted    = Color3.fromRGB(108, 70,  70),
+	Stroke       = Color3.fromRGB(58,  30,  30),
+	Green        = Color3.fromRGB(75,  215, 105),
+	GreenDark    = Color3.fromRGB(30,  110, 50),
+}
+
+local TS      = TweenInfo.new(0.32, Enum.EasingStyle.Quart, Enum.EasingDirection.Out)
+local TS_FAST = TweenInfo.new(0.14, Enum.EasingStyle.Quart, Enum.EasingDirection.Out)
+
+-- ── UI helpers ────────────────────────────────────────────────────────────────
+local function mk(cls, parent, props)
+	local i = Instance.new(cls)
+	if parent then i.Parent = parent end
+	if props  then for k, v in pairs(props) do i[k] = v end end
+	return i
+end
+
+local function corner(p, r)
+	return mk("UICorner", p, {CornerRadius = UDim.new(0, r or 8)})
+end
+
+local function stroke(p, c, t)
+	return mk("UIStroke", p, {Color=c or T.Stroke, Thickness=t or 1, ApplyStrokeMode=Enum.ApplyStrokeMode.Border})
+end
+
+local function grad(p, c0, c1, r)
+	return mk("UIGradient", p, {
+		Color    = ColorSequence.new{ColorSequenceKeypoint.new(0,c0), ColorSequenceKeypoint.new(1,c1)},
+		Rotation = r or 90,
+	})
+end
+
+local rootGui = mk("ScreenGui", playerGui, {
+	Name="SyncUI", ResetOnSpawn=false, IgnoreGuiInset=true,
+	ZIndexBehavior=Enum.ZIndexBehavior.Sibling, DisplayOrder=50,
+})
+
+local notifSound = mk("Sound", SoundService, {
+	SoundId=NOTIFICATION_SOUND_ID, Volume=NOTIFICATION_VOLUME, RollOffMaxDistance=0,
+})
+
+local function slideIn(frame)
+	TweenService:Create(frame, TS, {Position=UDim2.new(0, 12, 0, CARD_Y)}):Play()
+end
+
+local function slideOut(frame, onDone)
+	local t = TweenService:Create(frame, TS_FAST, {Position=UDim2.new(0, -300, 0, CARD_Y)})
+	t:Play(); if onDone then t.Completed:Connect(onDone) end
+end
+
+local function makeCard(w, h)
+	local f = mk("Frame", rootGui, {
+		Size=UDim2.fromOffset(w, h), Position=UDim2.new(0, -300, 0, CARD_Y),
+		BackgroundColor3=T.Panel, ZIndex=51,
+	})
+	corner(f, 10); stroke(f, T.Stroke, 1.5)
+	grad(f, Color3.fromRGB(29,16,16), Color3.fromRGB(12,6,6), 130)
+	local aline = mk("Frame", f, {Size=UDim2.new(1,0,0,2), BackgroundColor3=Color3.new(1,1,1), ZIndex=52})
+	grad(aline, T.AccentDeep, T.Accent, 0); corner(aline, 2)
+	return f
+end
+
+local function makeDot(parent)
+	local d = mk("Frame", parent, {
+		Size=UDim2.fromOffset(7,7), Position=UDim2.new(0,10,0,10),
+		BackgroundColor3=T.Accent, ZIndex=52,
+	})
+	corner(d, 4); stroke(d, T.AccentBright, 1)
+end
+
+local function makeBtn(parent, text, bgCol, strokeCol, g0, g1, pos, w, h)
+	local btn = mk("TextButton", parent, {
+		Size=UDim2.fromOffset(w or 100, h or 26), Position=pos,
+		BackgroundColor3=bgCol, Text="", ZIndex=52, AutoButtonColor=false,
+	})
+	corner(btn, 7); stroke(btn, strokeCol, 1)
+	if g0 then grad(btn, g0, g1 or bgCol) end
+	mk("TextLabel", btn, {
+		Size=UDim2.fromScale(1,1), BackgroundTransparency=1,
+		Text=text, TextColor3=T.Text, TextSize=9, Font=Enum.Font.GothamBlack, ZIndex=53,
+	})
+	btn.MouseEnter:Connect(function() TweenService:Create(btn, TS_FAST, {BackgroundTransparency=0.22}):Play() end)
+	btn.MouseLeave:Connect(function() TweenService:Create(btn, TS_FAST, {BackgroundTransparency=0}):Play() end)
+	return btn
+end
+
+local function makeLabel(parent, text, size, pos, color, font, xalign)
+	return mk("TextLabel", parent, {
+		Size=size, Position=pos, BackgroundTransparency=1,
+		Text=text, TextColor3=color or T.Text, TextSize=11,
+		Font=font or Enum.Font.GothamBold,
+		TextXAlignment=xalign or Enum.TextXAlignment.Left,
+		TextTruncate=Enum.TextTruncate.AtEnd, ZIndex=52,
+	})
+end
+
+-- ── State ─────────────────────────────────────────────────────────────────────
+local syncedWith      = nil
+local syncTarget      = nil
+local syncCard        = nil
+local inviteCard      = nil
+local inviteTimeout   = nil
+
+-- ── Sync card ─────────────────────────────────────────────────────────────────
+local function destroySyncCard()
+	if syncCard and syncCard.Parent then syncCard:Destroy() end
+	syncCard = nil; syncTarget = nil
+end
+
+local function showSyncCard(target)
+	if syncCard and syncTarget == target then
+		slideOut(syncCard, destroySyncCard); return
+	end
+	destroySyncCard()
+	syncTarget     = target
+	local isSynced = (syncedWith == target)
+	local card     = makeCard(220, 80)
+	syncCard       = card
+
+	makeDot(card)
+	makeLabel(card, "PLAYER",
+		UDim2.new(1,-26,0,13), UDim2.new(0,22,0,5), T.TextMuted, Enum.Font.GothamBlack)
+	makeLabel(card, target.DisplayName,
+		UDim2.new(1,-16,0,18), UDim2.new(0,10,0,20), T.Text, Enum.Font.GothamBlack)
+
+	local actionBtn = makeBtn(card, isSynced and "UNSYNC" or "SYNC",
+		isSynced and T.AccentDeep or T.Accent,
+		isSynced and T.AccentDark or T.Accent,
+		isSynced and T.AccentDeep or T.Accent,
+		isSynced and Color3.fromRGB(55,5,5) or T.AccentDark,
+		UDim2.new(0,10,1,-32), 140, 26)
+
+	local closeBtn = makeBtn(card, "✕", T.Panel, T.Stroke, nil, nil,
+		UDim2.new(1,-36,1,-32), 26, 26)
+
+	actionBtn.MouseButton1Click:Connect(function()
+		if isSynced then UnsyncRequest:FireServer() else SyncRequest:FireServer(target) end
+		slideOut(card, destroySyncCard)
+	end)
+	closeBtn.MouseButton1Click:Connect(function() slideOut(card, destroySyncCard) end)
+	slideIn(card)
+end
+
+-- ── Invite card ───────────────────────────────────────────────────────────────
+local function destroyInviteCard()
+	if inviteTimeout then task.cancel(inviteTimeout); inviteTimeout=nil end
+	if inviteCard and inviteCard.Parent then inviteCard:Destroy() end
+	inviteCard = nil
+end
+
+local function showInviteCard(requester)
+	destroyInviteCard()
+	if notifSound.SoundId ~= "rbxassetid://0" and notifSound.SoundId ~= "" then
+		notifSound:Play()
+	end
+
+	local card = makeCard(232, 88)
+	inviteCard  = card
+
+	makeDot(card)
+	makeLabel(card, "SYNC REQUEST",
+		UDim2.new(1,-26,0,13), UDim2.new(0,22,0,5), T.TextMuted, Enum.Font.GothamBlack)
+	makeLabel(card, (requester and requester.DisplayName or "Someone") .. " wants to sync",
+		UDim2.new(1,-16,0,18), UDim2.new(0,10,0,22), T.Text, Enum.Font.GothamBold)
+
+	local acceptBtn  = makeBtn(card, "ACCEPT",  T.GreenDark, T.Green,
+		T.GreenDark, Color3.fromRGB(18,72,30), UDim2.new(0,10,1,-34), 100, 26)
+	local declineBtn = makeBtn(card, "DECLINE", T.AccentDeep, T.AccentDark,
+		T.AccentDeep, Color3.fromRGB(55,5,5), UDim2.new(1,-112,1,-34), 100, 26)
+
+	local function dismiss(accepted)
+		if not inviteCard then return end
+		SyncRespond:FireServer(accepted)
+		slideOut(card, destroyInviteCard)
+	end
+
+	acceptBtn.MouseButton1Click:Connect(function()  dismiss(true)  end)
+	declineBtn.MouseButton1Click:Connect(function() dismiss(false) end)
+	slideIn(card)
+
+	inviteTimeout = task.delay(POPUP_TIMEOUT, function()
+		if inviteCard then dismiss(false) end
+	end)
+end
+
+-- ── Click detection ───────────────────────────────────────────────────────────
+local function handleWorldClick(inputPos)
+	local myChar = player.Character; if not myChar then return end
+	local myHRP  = myChar:FindFirstChild("HumanoidRootPart"); if not myHRP then return end
+
+	local otherChars = {}
+	for _, p in ipairs(Players:GetPlayers()) do
+		if p ~= player and p.Character then table.insert(otherChars, p.Character) end
+	end
+	if #otherChars == 0 then return end
+
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Include
+	params.FilterDescendantsInstances = otherChars
+
+	local ray    = camera:ScreenPointToRay(inputPos.X, inputPos.Y)
+	local result = workspace:Raycast(ray.Origin, ray.Direction * 120, params)
+
+	if not result then
+		if syncCard then slideOut(syncCard, destroySyncCard) end; return
+	end
+
+	local hitPlayer
+	for _, p in ipairs(Players:GetPlayers()) do
+		if p ~= player and p.Character and result.Instance:IsDescendantOf(p.Character) then
+			hitPlayer = p; break
+		end
+	end
+	if not hitPlayer then return end
+	if (myHRP.Position - result.Position).Magnitude > MAX_SYNC_DISTANCE then return end
+
+	showSyncCard(hitPlayer)
+end
+
+-- ── Events ────────────────────────────────────────────────────────────────────
+UserInputService.InputBegan:Connect(function(inp, gpe)
+	if not gpe and inp.UserInputType == Enum.UserInputType.MouseButton1 then
+		handleWorldClick(inp.Position)
+	end
+end)
+
+SyncState.OnClientEvent:Connect(function(partner)
+	syncedWith = partner
+	if syncCard then slideOut(syncCard, destroySyncCard) end
+	destroyInviteCard()
+end)
+
+SyncInvite.OnClientEvent:Connect(function(requester)
+	task.spawn(showInviteCard, requester)
+end)
